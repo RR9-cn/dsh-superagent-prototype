@@ -68,42 +68,21 @@ The prepare command and Executor instructions receive the same execution variabl
 | --- | --- | --- |
 | `DSH_SUPERAGENT_DIR`, `DSH_SUPERAGENT_NAME`, `DSH_SUPERAGENT_TICKET` | Executor | The Ticket's directory, short name and id |
 | `DSH_SUPERAGENT_BLOCKED_COMMANDS` | Executor | Commands the Executor may not run |
-| `DSH_SUPERAGENT_GITHUB_REPOSITORY` | GitHub | The repository the Source watches, `owner/name` |
-| `DSH_SUPERAGENT_GITHUB_ACCOUNT`, `DSH_SUPERAGENT_GITHUB_COMMIT_EMAIL` | GitHub | The agent account and its commit email |
-| `DSH_SUPERAGENT_GITHUB_NUMBER`, `DSH_SUPERAGENT_GITHUB_PR_HEAD` | GitHub | The Issue or pull request that started the Ticket, and its head ref when it is a pull request |
 | `DSH_SUPERAGENT_FEISHU_BOT`, `DSH_SUPERAGENT_FEISHU_CHAT` | Feishu | The bot, and the chat that started the Ticket |
 
 Ticket-specific values come from its directory and originating Trigger. Other values come from the current deployment settings. Only the panel can change execution environment settings; text sent to the main Session cannot change the configured shell command.
 
-Workers reach GitHub through the agent account's `gh` and Feishu through the bot's `lark-cli`. Blocked commands fail when invoked by name.
+Workers reach Feishu through the bot's `lark-cli`. Blocked commands fail when invoked by name.
 
 These wrappers and directories establish defaults, not a security boundary. A worker can still execute a program by absolute path.
-
-## Merging
-
-Auto-merge is governed by the **Delivery requirements** prompt. The host has no merge-specific decision logic.
-
-By default, the Executor never enables auto-merge as the agent account: GitHub attributes the merge to whoever enabled it. Delivery requirements must name another account's CLI for merging. Without one, people merge the pull request.
-
-The default instructions allow auto-merge only for a pull request opened for the Ticket, when it is ready, the required approvals cover the head commit, and additions plus deletions total fewer than 200 lines. Before pushing another revision, the Executor withdraws auto-merge.
-
-Reviews without a body, such as approvals, also arrive as Triggers and can wake an Executor waiting for review. These instructions govern the agent, not GitHub's merge rules. To enforce approvals, require them in branch protection and dismiss stale approvals. Omit the merge CLI or remove the auto-merge paragraph to require manual merging.
 
 ## How a Ticket ends
 
 - **Ready without a pull request:** a `ready` Report ends the Ticket as completed.
 - **Nothing to do:** an Executor that finds no work for a person to act on, such as a request that does not reproduce or is superseded, reports `dropped`. The Ticket ends without a message, unless a matched rule asks for one, and a person's later message on its Threads resumes it.
-### Pull requests
+### HiFox pilot
 
-A Ticket follows the pull request it started from once its Executor reports it. It also follows each pull request opened from its branch once reported by the Executor or found by the GitHub Source. Reopened pull requests are followed again.
-
-The Ticket is done when none of the pull requests it opened remain open. If it opened none, all pull requests it follows must be closed. It then ends with the outcome of the last relevant close and keeps its Subscriptions, allowing a later human comment to resume it.
-
-A close does not end the Ticket while resumed, retried or recovered work is unfinished. It also waits if the Executor acknowledged or answered a follow-up it owns but has not since made a non-progress Report or ended a turn after reading that message. A later `ready` Report ends the Ticket once the same pull-request completion rule is satisfied.
-
-Chat Channels receive one final notice about the pull-request outcome. GitHub already displays the outcome on the pull request itself. Removing a Ticket's Subscription to a pull request also stops it following that pull request.
-
-"Awaiting review" therefore means a `ready` Report with a pull request.
+A Ticket routed to HiFox binds to a remote task and Run. The executor verifies that the Run belongs to the task and input revision, then checks the evidence before recording a result and sending a channel reply. Missing evidence stays visible on the Ticket.
 
 ### Follow-ups and context Threads
 
@@ -113,7 +92,7 @@ An Input counts as read after the Session takes it into a step and subsequently 
 
 Threads followed only for context still deliver messages, but do not give the Ticket ownership of human follow-ups or resume ended Tickets. Those messages can be assessed independently.
 
-Sources poll subscribed Threads while a live Ticket subscribes, and for two weeks after the later of the last Trigger and the subscribing Tickets' end. Afterwards, messages arrive only through ordinary intake: GitHub notifications or Feishu live events.
+Sources poll subscribed Threads while a live Ticket subscribes, and for two weeks after the later of the last Trigger and the subscribing Tickets' end. Afterwards, messages arrive through the source’s ordinary event intake.
 
 ## Failure and recovery
 
@@ -143,7 +122,7 @@ A retry ends the current Assignment and starts a new one in the same Executor Se
 The Executor model applies only when a Session is created; an existing Session keeps its model.
 ### Restart
 
-Running Assignments end with "host restarted" and new ones start with a recovery note that tells the Executor to check its directory, git history and GitHub before repeating any outside action, oldest Ticket first.
+Running Assignments end with "host restarted" and new ones start with a recovery note that tells the Executor to check its directory, Git history and any external changes already made before repeating any outside action, oldest Ticket first.
 
 Assignments that are waiting, ready, blocked or failed stay as they are, unless an Input reached them after that Report, in which case they start again too.
 
@@ -161,17 +140,8 @@ Each kind of work reports an error among the overview's system problems only aft
 Relays to the main Session keep their order, and so do notices; a failed one holds back the later ones of its kind.
 ### Source failure
 
-The GitHub Source reads each Issue, pull request and Thread on its own: a failed read keeps its error on its Thread, is read again on the next poll, and counts towards an error of the Source, which it reports after three failed polls in a row by default; any successful poll resets the count.
+The Feishu event consumer reports failures. Polling of subscribed topics keeps each failure on its Thread and skips malformed items.
 
-GitHub answers 404 also when the agent lost access to a private repository, so a 404 is retried.
-
-A notified Issue or pull request whose reads keep failing is dropped a day after its first failed read, and at once when GitHub reports it as deleted; it then no longer fails the poll, its Thread keeps the error, and the Source's state names it.
-
-Its read position stays where it was, so a later notification or a poll of its Thread reads what the failed reads missed.
-
-The Feishu event consumer reports every failure, and polling of subscribed topics keeps each failure on its Thread.
-
-A malformed item in a GitHub list or a Feishu page is skipped, and the Source's state counts it.
 ### Channel failure
 
 Outgoing messages are stored and sent as stored work, retried with backoff from 5 seconds, doubling up to 300.
@@ -184,9 +154,7 @@ A message with failed attempts is a system problem until it goes out or is withd
 
 A message is dropped only when its Source no longer listens to the conversation, or when the Source answers that the conversation can never receive it; while its Source is off, it waits.
 
-The Sources answer that for a deleted Issue or a locked conversation on GitHub, and for a recalled message or one Feishu no longer finds on Feishu.
-
-A reply to a review comment that no longer exists goes to the pull request's conversation instead.
+Feishu reports recalled or missing messages as unavailable for replies.
 
 A dropped message keeps its record, with when and why it was dropped and the Ticket it was for, so it is never queued again; a dropped acknowledgement reads as dropped, not sent.
 ### Pause processing

@@ -6,17 +6,57 @@ import { usePanel, mount, remount, all, find, tab, click, text } from './fixture
 import { server, droppedReply, threadSummary } from './fixtures/panel-server.ts'
 
 usePanel()
-it('leads the overview with the pending Tickets, then problems, the last day and the Executor, each linking to its stage', async () => {
+it('shows the configured HiFox scope and its local intake status', async () => {
+  server.hifox = { state: 'configured', ingress: 'socket', space: 'space-1',
+    listener: { state: 'stopped' } }
+  await mount()
+  for (const value of [zh.hifoxConfigured, zh['hifoxIngress.socket'], 'space-1']) {
+    expect(text()).toContain(value)
+  }
+  expect(text()).not.toContain(zh.hifoxUnconfigured)
+  expect(text()).toContain(zh['hifoxListener.stopped'])
+  expect(server.requests.some(request => request.method === 'POST' && request.path.startsWith('hifox/listener'))).toBe(false)
+  await click(zh.hifoxListenerStart)
+  expect(text()).toContain(zh['hifoxListener.listening'])
+  await click(zh.hifoxListenerStop)
+  expect(text()).toContain(zh['hifoxListener.stopped'])
+  expect(server.requests.filter(request => request.method === 'POST').map(request => request.path))
+    .toEqual(['hifox/listener/start', 'hifox/listener/stop'])
+})
+
+it('can stop a live DingTalk listener while HiFox processing is paused', async () => {
+  server.hifox = { state: 'paused', ingress: 'direct', space: 'space-1',
+    listener: { state: 'listening', detail: 'Event needs review: missing_request' } }
+  await mount()
+  expect(text()).toContain('Event needs review: missing_request')
+  await click(zh.hifoxListenerStop)
+  expect(text()).toContain(zh['hifoxListener.stopped'])
+  expect(text()).not.toContain(zh.hifoxListenerStart)
+})
+
+it('shows the reason when the operator cannot start a stopped listener', async () => {
+  server.hifox = { state: 'configured', ingress: 'direct', space: 'space-1',
+    listener: { state: 'stopped' } }
+  server.listenerStartProblem = 'Add an authorized DingTalk sender before starting the listener.'
+  await mount()
+  await click(zh.hifoxListenerStart)
+  expect(document.querySelector('.dt-toast')?.textContent).toBe(server.listenerStartProblem)
+  expect(text()).toContain(zh['hifoxListener.stopped'])
+})
+
+it('shows HiFox status, pending Tickets, problems, the last day and the Executor, each linking to its stage', async () => {
   await mount()
   expect(tab(zh['tab.overview']).getAttribute('aria-selected')).toBe('true')
   expect(all('[role="tab"]').map(tab => tab.textContent)).toEqual(['概览', '来源', '触发', '评估', '执行', '设置'])
-  expect(all('.dt-section-title').map(title => title.textContent)).toEqual(['待处理工单2', '系统问题2', '过去 24 小时详情 ›', '执行器详情 ›'])
+  expect(all('.dt-section-title').map(title => title.textContent)).toEqual([`HiFox${zh.hifoxOpenSettings}`, '待处理工单2', '系统问题2',
+    '过去 24 小时详情 ›', '执行器详情 ›'])
   expect(all('.dt-cards .dt-ticket-stage').map(item => item.textContent)).toEqual(['待回答', '待处理失败'])
   expect(all('.dt-cards .dt-att-what').map(item => item.textContent)).toEqual(['飞书 来源异常', '评估未完成：这个文案好奇怪'])
   // Actions sit below the title and Threads, apart from the stage, each with its icon.
   expect(all('.dt-ticket').every(row => row.querySelector('.dt-ticket-stage button, .dt-ticket-stage a') === null
     && [...row.querySelectorAll('.dt-ticket-actions button, .dt-ticket-actions a')].every(action => action.querySelector('svg')))).toBe(true)
   expect(text()).toContain('来源会在每次轮询时自动重试')
+  expect(text()).toContain(zh.hifoxUnconfigured)
   expect(text()).toContain('需要确认按钮颜色')
   expect(all('.dt-stat').map(stat => stat.textContent)).toEqual(['到达12', '被过滤2', '已评估5', '接单或续做1', '执行中2 / 3', '排队0', '等待新触发1'])
   expect(all('.dt-chip').map(chip => chip.textContent)[0]).toBe('GitHub#42CI 失败1')
@@ -125,7 +165,7 @@ it('words a refused retry in the interface language by its code', async () => {
 
 it('shows the overview in English', async () => {
   await mount(en)
-  expect(all('.dt-section-title').map(title => title.textContent)).toEqual([`${en.pendingTickets}2`, `${en.problems}2`,
+  expect(all('.dt-section-title').map(title => title.textContent)).toEqual([`HiFox${en.hifoxOpenSettings}`, `${en.pendingTickets}2`, `${en.problems}2`,
     `${en.lastDay}${en.details}`, `${en['term.executor']}${en.details}`])
   expect(all('.dt-cards .dt-ticket-stage').map(item => item.textContent)).toEqual([en['stage.answer'], en['stage.failed']])
   expect(all('.dt-stat-label').map(label => label.textContent)).toEqual([en.flowReceivedLabel, en.flowFilteredLabel, en.flowJudgedLabel,
@@ -140,7 +180,7 @@ it('lists the unavailable Evals one by one, without the health entry that counts
 })
 
 it('says when no Source is on, an Eval is past its deadline or a message keeps failing, each with the way to it', async () => {
-  for (const kind of ['feishu', 'github']) server.settings.sources[kind] = { ...server.settings.sources[kind]!, enabled: false }
+  for (const kind of ['feishu']) server.settings.sources[kind] = { ...server.settings.sources[kind]!, enabled: false }
   server.threads = [threadSummary({ key: 'github:9', title: '#9 迟迟未决', stage: 'evaluating',
     evaluating: { id: 'v9', triggers: 1, strength: 'inferred', startedAt: '2026-08-31T23:58:00Z', deadline: '2026-09-01T00:00:00Z' } })]
   server.failing = [{ id: 'm1', channel: { source: 'github', thread: 'github:42', address: { number: '42' } },

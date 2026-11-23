@@ -1,3 +1,4 @@
+import { retiredSource } from '../sources/kind.ts'
 /** SQLite persistence for domain aggregates, key-value state, settings history, and the channel outbox. */
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
 import { chmodSync, mkdirSync } from 'node:fs'
@@ -183,7 +184,12 @@ export class Store implements Repositories {
   /** Versioned settings snapshots; the current settings are the snapshot of the latest revision. */
   private readonly settingsVersions = new Versions<SettingsVersion>(this, KV.settings.revision, KV.settings.version)
   /** Current validated settings. */
-  settings(): Settings { return SettingsSchema.parse(this.settingsVersions.current()?.settings ?? {}) }
+  settings(): Settings {
+    const settings = SettingsSchema.parse(this.settingsVersions.current()?.settings ?? {})
+    for (const id of Object.keys(settings.sources)) if (retiredSource(id)) delete settings.sources[id]
+    for (const id of Object.keys(settings.policy.sources)) if (retiredSource(id)) delete settings.policy.sources[id]
+    return settings
+  }
   /** Revision of one settings block; each configuration page saves against its own block for optimistic concurrency. */
   blockRevision(block: SettingsSave): number { return this.get(KV.settings.block(block)) ?? 0 }
   /** Saves settings as the next revision (making it current) and increments `record.block`'s revision counter when present. */

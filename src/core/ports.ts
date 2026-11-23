@@ -7,7 +7,7 @@ import type { Reason } from './reasons.ts'
 export type GateResult = { admissible: false; reason: string } | { admissible: true; strength: Strength; basis: MandateBasis }
 
 /** Whether a Source receives a Trigger; `observed` when it also receives messages not addressed to the agent, and `row` the receiving scope the Policy's admission table names, such as a chat. */
-export type ScopeResult = { listened: true; observed: boolean; row?: string } | { listened: false; reason: string }
+export type ScopeResult = { listened: true; observed: boolean; row?: string; acceptsAnyAddressedSender?: true } | { listened: false; reason: string }
 /** Source configuration as the domain sees it: listening scope per trigger or per recorded Mandate basis. */
 export interface SourceScope {
   scope(input: { source: string; meta: Record<string, unknown> }): ScopeResult
@@ -42,7 +42,7 @@ export type AssessmentOutcome =
   | { kind: 'unavailable'; reason: string | Reason; audit?: Record<string, unknown> }
   /** An accept: `rules` the assessment matched, `name` the ticket's requested short name, and `note` a routing note for its worker. */
   | { kind: 'accept'; title: string; scope: string; reason: string | Reason; acknowledgement?: string; rules?: string[]; audit?: Record<string, unknown>;
-    name?: string; note?: string }
+    name?: string; note?: string; hiFoxAgent?: Ticket['hiFoxAgent']; hiFoxQuote?: Ticket['hiFoxQuote'] }
   | { kind: 'stop'; ticketId: string; reason: string | Reason; audit?: Record<string, unknown> }
 
 /** Semantic judgement. `request` queues the assessment, idempotently per `evalId`; the outcome returns through `Engine.decide`. */
@@ -69,7 +69,10 @@ export interface Executor {
 }
 
 /** A message for a Channel; `ticketId` names the Ticket it is for, when there is one. */
-export interface OutboundMessage { id: string; channel: ChannelRef; text: string; kind: 'acknowledgement' | 'reply' | 'notice'; ticketId?: string }
+export interface OutboundMessage {
+  id: string; channel: ChannelRef; text: string; kind: 'acknowledgement' | 'reply' | 'notice'; ticketId?: string
+  hiFoxTerminal?: true
+}
 /** A queued message waits (`pending`), went out (`sent`), or was dropped because its conversation can never receive it (`dropped`). */
 export type ReplyStatus = 'pending' | 'sent' | 'dropped'
 /** The messages queued for Channels; the Engine queues them inside its commands, and a sender delivers them later. */

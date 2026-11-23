@@ -2,7 +2,9 @@
  * Signals that an effect cannot run right now, such as when processing is paused or all worker slots are full.
  * Effects reschedules the row after the initial retry delay without incrementing its failure count, and DshExecutor throws it from launch and delivery handlers.
  */
-export class Later extends Error {}
+export class Later extends Error {
+  constructor(message: string, readonly delayMs?: number) { super(message) }
+}
 /** Consecutive failures before an effect kind reports an error, matching the Sources poll failure threshold. */
 export const FAILURES_BEFORE_ERROR = 3
 import type { HealthBoard, HealthEntry } from '../infra/health.ts'
@@ -15,6 +17,8 @@ export interface EffectPayloads {
   launch: { ticketId: string; assignmentId: string }
   /** Hand a ticket's waiting Inputs to its running Assignment; the key is the Ticket ID. */
   delivery: { ticketId: string }
+  /** Advance a HiFox ticket or reconcile its outstanding external write, keyed by ticket ID. */
+  hifox: { ticketId: string }
   /** Steer a report or a candidate into the main Session; the key is the request ID. */
   relay: { text: string }
   /** Inject a notice into the main Session without waking it; the key names what it reports, such as `prompts`. */
@@ -136,7 +140,7 @@ export class Effects {
     // Leave running rows untouched on shutdown so they retry on the next start.
     else if (this.stopped) return
     else if (failure.error instanceof Later) {
-      this.store.db.prepare(`UPDATE effect SET due = ? WHERE ${own}`).run(this.now() + handler.retry[0], ...ownRow)
+      this.store.db.prepare(`UPDATE effect SET due = ? WHERE ${own}`).run(this.now() + (failure.error.delayMs ?? handler.retry[0]), ...ownRow)
     } else {
       const delay = Math.min(handler.retry[1], handler.retry[0] * 2 ** Math.min(row.attempts, 16))
       this.store.db.prepare(`UPDATE effect SET attempts = attempts + 1, error = ?, due = ? WHERE ${own}`)

@@ -5,7 +5,6 @@
 import type { PromptVersion } from './app/prompts.ts'
 import type { SettingsVersion } from './app/store.ts'
 import type { SettingsSave } from './policy.ts'
-import type { Retry } from './sources/github.ts'
 
 /** Key of a KV record whose value has type `V`; a plain string represents an untyped key. */
 export type Key<V> = string & { readonly __value?: V }
@@ -43,7 +42,7 @@ export const KV = {
    * per-stream cursor, start times by kind, and ETag; default-branch CI state; and per-PR CI fingerprint and revision (`revision`
    * counts reported CI changes so each produces a distinct Trigger ID).
    */
-  github: { since: record<string>('github-since'), retries: record<Record<string, Retry>>('github-retry'),
+  github: { since: record<string>('github-since'), retries: record<Record<string, { since: string; pr: boolean }>>('github-retry'),
     cursor: family<string, [number: number]>('github-cursor:'),
     stream: family<{ since: string; started: Record<string, string>; etag?: string }, [stream: string]>('github-stream:'),
     branchCi: record<{ branch?: string; failures?: string[]; revision: number }>('github-branch-ci'),

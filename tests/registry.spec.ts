@@ -11,7 +11,6 @@ import { sourceContextOf, type SourceContextDeps } from '../src/app/source-conte
 import { feishuChannel, feishuTrigger, feishuTriggerId } from '../src/sources/feishu-trigger.ts'
 import { testDeployment } from './fixtures/deployment.ts'
 import { feishuKind } from '../src/sources/feishu.ts'
-import { githubKind } from '../src/sources/github.ts'
 
 const probe: SourceKind<{ interval: number }> = {
   kind: 'probe', title: { zh: '探针', en: 'Probe' }, description: { zh: '', en: '' }, health: [],
@@ -19,14 +18,15 @@ const probe: SourceKind<{ interval: number }> = {
   fields: [{ key: 'interval', type: 'number', min: 1, max: 60, label: { zh: '间隔', en: 'Interval' } }],
 }
 
+const inbox = { ...probe, kind: 'inbox', health: ['inbox'] }
+
 describe('Source registry', () => {
   it('lists every installed kind with defaults, in id order, followed by stored instances whose kind is not installed', () => {
     const settings = SettingsSchema.parse({ sources: { probe: { enabled: false, config: { interval: 9 } }, retired: { enabled: true, config: { x: 1 } } } })
     const sources = new SourceRegistry(() => settings)
-    sources.register(probe); sources.register(githubKind)
+    sources.register(probe); sources.register(inbox)
     expect(sources.instances()).toEqual([
-      { id: 'github', kind: 'github', enabled: true, config: { repository: '', cli: '', pollSeconds: 60, failuresBeforeError: 3,
-        observeIssues: false, observePulls: false, observeComments: false, observeCi: false }, installed: true },
+      { id: 'inbox', kind: 'inbox', enabled: true, config: { interval: 5 }, installed: true },
       { id: 'probe', kind: 'probe', enabled: false, config: { interval: 9 }, installed: true },
       { id: 'retired', kind: 'retired', enabled: true, config: { x: 1 }, installed: false },
     ])
@@ -78,29 +78,29 @@ describe('Source registry', () => {
     // Pre-claim built-in health entries; sync:* entries are reserved for settings sync.
     for (const name of ['runtime', 'reply']) board.claim(name)
     const sources = new SourceRegistry(() => SettingsSchema.parse({}), board)
-    const unregister = sources.register(githubKind)
-    expect(() => sources.register({ ...probe, health: ['github'] })).toThrow('declares the health entry github')
+    const unregister = sources.register(inbox)
+    expect(() => sources.register({ ...probe, health: ['inbox'] })).toThrow('declares the health entry inbox')
     for (const name of ['runtime', 'reply', 'sync:github']) expect(() => sources.register({ ...probe, health: ['probe', name] })).toThrow(name)
     expect(sources.kind('probe')).toBeUndefined()
     sources.register({ ...probe, health: ['probe'] })
     const context = (kind: { kind: string; health: readonly string[] }) => sourceContextOf({ sources } as unknown as SourceContextDeps, kind)
-    const first = context(githubKind)
-    first.report('github', { state: 'ready', detail: 'ok' })
-    expect(board.all.github).toEqual({ state: 'ready', detail: 'ok' })
+    const first = context(inbox)
+    first.report('inbox', { state: 'ready', detail: 'ok' })
+    expect(board.all.inbox).toEqual({ state: 'ready', detail: 'ok' })
     expect(() => first.report('probe', { state: 'ready', detail: '' })).toThrow('has no health entry probe')
     // A report sent after its kind unregisters (such as from an exiting CLI listener) is ignored and does not affect a later registration.
     unregister()
-    expect(() => first.report('github', { state: 'error', detail: 'WARN exiting' })).not.toThrow()
-    expect(board.all.github).toBeUndefined()
-    sources.register(githubKind)
-    first.report('github', { state: 'error', detail: 'late' })
-    expect(board.all.github).toEqual({ state: 'starting', detail: '' })
-    context(githubKind).report('github', { state: 'ready', detail: 'again' })
-    expect(board.all.github).toEqual({ state: 'ready', detail: 'again' })
+    expect(() => first.report('inbox', { state: 'error', detail: 'WARN exiting' })).not.toThrow()
+    expect(board.all.inbox).toBeUndefined()
+    sources.register(inbox)
+    first.report('inbox', { state: 'error', detail: 'late' })
+    expect(board.all.inbox).toEqual({ state: 'starting', detail: '' })
+    context(inbox).report('inbox', { state: 'ready', detail: 'again' })
+    expect(board.all.inbox).toEqual({ state: 'ready', detail: 'again' })
   })
   it('names the Trigger whose message a Trigger\'s message answers, where its kind can', () => {
     const sources = new SourceRegistry(() => SettingsSchema.parse({}))
-    sources.register(feishuKind); sources.register(githubKind)
+    sources.register(feishuKind); sources.register(inbox)
     const reply = feishuTrigger({ message_id: 'om_2', chat_id: 'oc_1', chat_type: 'group', sender_id: 'ou_alice', sender_type: 'user',
       content: 'yes', create_time: '1757376000000', parent_id: 'om_1' }, 'ou_bot', 'cli_bot')!
     expect(sources.repliesTo(reply)).toBe(feishuTriggerId('om_1'))
@@ -109,9 +109,7 @@ describe('Source registry', () => {
   })
   it('finds what a search query names in each kind\'s terms', () => {
     const sources = new SourceRegistry(() => SettingsSchema.parse({}))
-    sources.register(feishuKind); sources.register(githubKind)
-    expect(sources.find('#12')).toEqual({ threads: ['github:12'], terms: [] })
-    expect(sources.find('https://github.com/acme/widgets/pull/7#issuecomment-3')).toEqual({ threads: ['github:7'], terms: [] })
+    sources.register(feishuKind); sources.register(inbox)
     expect(sources.find('see om_abc and om_abc, om_def')).toEqual({ threads: [], terms: ['om_abc', 'om_def'] })
     expect(sources.find('login fails')).toEqual({ threads: [], terms: [] })
     expect(feishuKind.policy!.unnamed).toEqual({ person: { zh: '飞书用户', en: 'Feishu user' }, bot: { zh: '飞书机器人', en: 'Feishu bot' } })
@@ -125,12 +123,11 @@ describe('Source registry', () => {
   })
   it('validates each Source\'s part of the Policy with its kind, keeping parts of kinds that are not installed as stored', () => {
     const sources = new SourceRegistry(() => SettingsSchema.parse({ policy: { sources: { feishu: { allowed: [{ id: 'ou_alice' }] } } } }))
-    sources.register(feishuKind); sources.register(githubKind)
+    sources.register(feishuKind); sources.register(inbox)
     expect(sources.validatePolicy({ feishu: { allowed: [{ id: 'ou_alice', name: 'Alice' }] }, retired: { allowed: [], x: 1 } }))
       .toEqual({ feishu: { allowed: [{ id: 'ou_alice', name: 'Alice' }], syncChat: '', admission: {} }, retired: { allowed: [], x: 1 } })
     expect(() => sources.validatePolicy({ feishu: { allowed: [{ id: 'alice' }] } })).toThrow()
     expect(sources.policyPart('feishu')).toEqual({ allowed: [{ id: 'ou_alice' }], syncChat: '', admission: {} })
-    expect(sources.policyPart('github')).toEqual({ allowed: [], admission: {} })
     sources.register(probe)
     expect(sources.policyPart('probe')).toBeUndefined()
   })
@@ -138,12 +135,12 @@ describe('Source registry', () => {
     const settings = SettingsSchema.parse({ sources: { feishu: { enabled: true, config: { chats: [{ chatId: 'oc_team', listen: 'mentions' }], directMessages: false } } } })
     const sources = new SourceRegistry(() => settings)
     expect(sources.channelAllowed({ source: 'feishu', address: { chatId: 'oc_team' } })).toBe(false)
-    sources.register(feishuKind); sources.register(githubKind)
+    sources.register(feishuKind); sources.register(inbox)
     expect(sources.channelAllowed({ source: 'feishu', address: { chatId: 'oc_team' } })).toBe(true)
     expect(sources.channelAllowed({ source: 'feishu', address: { chatId: 'oc_other' } })).toBe(false)
     // A direct chat's id starts with oc_ too; the address says it is direct, and with direct messages off it gets no reply.
     expect(sources.channelAllowed(feishuChannel('oc_dm', 'om_1', true))).toBe(false)
-    expect(sources.channelAllowed({ source: 'github', address: { number: '7' } })).toBe(true)
+    expect(sources.channelAllowed({ source: 'github', address: { number: '7' } })).toBe(false)
   })
   it('delivers a reply to a direct message under the default settings', async () => {
     const sources = new SourceRegistry(() => SettingsSchema.parse({}))

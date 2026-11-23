@@ -1,3 +1,4 @@
+import { hiFoxTicket } from '../executor/hifox.ts'
 /** Loopback-only management HTTP routes with same-origin enforcement for the web panel. */
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
@@ -21,6 +22,8 @@ import type { Store } from './store.ts'
 import type { TextCache } from './cache.ts'
 import type { LinkTarget, ViewHost } from './views/records.ts'
 import type { Variable } from './execution-environment.ts'
+import type { DingTalkListenerStatus } from '../sources/dingtalk-listener.ts'
+import type { HiFoxAgent } from '../executor/hifox-port.ts'
 import { policyHistory } from './settings-history.ts'
 import { overview } from './views/overview.ts'
 import { settingsView } from './views/settings.ts'
@@ -47,6 +50,13 @@ export interface HttpHost {
   readonly deployment: Deployment
   readonly setupProblem?: SetupProblem | undefined
   readonly feishuProblem?: SetupProblem | undefined
+  hiFoxStatus?(): ({ state: 'unconfigured' } | {
+    state: 'configured' | 'paused'; ingress: 'socket' | 'direct' | 'offline'; space: string
+  }) & { listener: DingTalkListenerStatus }
+  hiFoxAgentRoster?(): Promise<{ agents: HiFoxAgent[] }>
+  listenerStatus?(): DingTalkListenerStatus
+  listenerStart?(): DingTalkListenerStatus
+  listenerStop?(): DingTalkListenerStatus
   configured(): boolean
   links(): LinkTarget
   ticketEnvironment(ticket: Ticket): Variable[]
@@ -90,15 +100,15 @@ function failure(error: unknown): [number, Record<string, unknown>] {
   return [500, { error: error instanceof Error ? error.message : String(error) }]
 }
 
-function machineView({ stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs }: Machine) {
-  return { stateDir, promptMaxChars: promptMaxChars.get(), admissionContextMaxPages: admissionContextMaxPages.get(),
-    admissionContextTimeoutMs: admissionContextTimeoutMs.get() }
+function machineView({ stateDir, repositoryPath, hiFoxSettings, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs }: Machine) {
+  return { stateDir, repositoryPath: repositoryPath ?? '', promptMaxChars: promptMaxChars.get(), admissionContextMaxPages: admissionContextMaxPages.get(),
+    admissionContextTimeoutMs: admissionContextTimeoutMs.get(), hiFoxSettings }
 }
 function setupView(runtime: HttpHost) {
   const resolved = runtime.configured() ? runtime.deployment : undefined
   return {
     machine: machineView(runtime.machine), problem: runtime.setupProblem ?? null, feishuProblem: runtime.feishuProblem ?? null,
-    accounts: resolved ? { repository: resolved.repository, agent: resolved.github.login, feishu: resolved.feishu ? { appId: resolved.feishu.appId, brand: resolved.feishu.brand, botId: resolved.feishu.botId, name: resolved.feishu.name } : null } : null,
+    accounts: resolved ? { repositoryPath: resolved.repositoryPath ?? null, feishu: resolved.feishu ? { appId: resolved.feishu.appId, brand: resolved.feishu.brand, botId: resolved.feishu.botId, name: resolved.feishu.name } : null } : null,
   }
 }
 /** Build the `/orchestrator/api/state` response consumed by the management panel and `scripts/dsh-superagent status` (`docs/006-deployment.md`). */
@@ -106,6 +116,7 @@ export function stateView(runtime: HttpHost) {
   const settings = runtime.store.settings()
   return { setup: setupView(runtime), load: { ...executorLoad(runtime.store, runtime.executor.activeCount()),
     maxWorkers: settings.executor.maxWorkers },
+    hifox: runtime.hiFoxStatus?.() ?? { state: 'unconfigured' as const, listener: { state: 'unavailable' as const } },
     masterId: runtime.masterId, paused: settings.paused, health: runtime.health }
 }
 const views = (runtime: HttpHost): ViewHost => ({ store: runtime.store, sources: runtime.sources, links: runtime.links() })
@@ -116,7 +127,7 @@ export type StateView = ReturnType<typeof stateView>
 function ticketPage(runtime: HttpHost, id: string) {
   const detail = ticketDetail(views(runtime), id), ticket = runtime.store.tickets.get(id)
   if (!detail || !ticket) throw new RouteError(404, 'Ticket not found')
-  return { ...detail, environment: runtime.configured() ? runtime.ticketEnvironment(ticket) : [] }
+  return { ...detail, hifox: hiFoxTicket(runtime.store, ticket) ?? null, environment: runtime.configured() ? runtime.ticketEnvironment(ticket) : [] }
 }
 export type TicketPageView = ReturnType<typeof ticketPage>
 function promptsView(runtime: HttpHost, revision: number | undefined, offset: number) {
@@ -203,6 +214,10 @@ function routes(runtime: HttpHost): Routes {
     'GET policy/history': () => policyHistory(store, runtime.sources, policyVersion(store.settings())),
     'POST policy-sync/:id': async ({ params }) => ({ policy: await runtime.settings.sync(params.id) }),
     'POST setup/check': () => { runtime.checkSetup(); return { restarting: true } },
+    'GET hifox/listener': () => runtime.listenerStatus?.() ?? { state: 'unavailable' },
+    'GET hifox/agents': () => runtime.hiFoxAgentRoster?.() ?? { agents: [] },
+    'POST hifox/listener/start': () => runtime.listenerStart?.() ?? { state: 'unavailable' },
+    'POST hifox/listener/stop': () => runtime.listenerStop?.() ?? { state: 'unavailable' },
     'GET models': () => runtime.models(),
     'GET prompts': ({ query }) => { const { revision, offset } = PromptsQuery.parse(query); return promptsView(runtime, revision, offset) },
     'PUT prompts': async input => {

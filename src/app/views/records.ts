@@ -1,3 +1,4 @@
+import { retiredSource } from '../../sources/kind.ts'
 /** Shared view projections for triggers, tickets, threads, decisions, and channel links. */
 import { z } from 'zod'
 import { canRetry, followupOwners, latestReport, liveTicket, settled, threadKey, ticketStage, type ActorRef, type ChannelRef, type Decision,
@@ -95,7 +96,7 @@ export function triggerView(view: Snapshot, trigger: Trigger, threadDecisions?: 
   const decided = !!disposition?.acked?.length || (!!decision && settled(decision))
   const unjudged = !!disposition?.filtered || decision?.kind === 'unavailable' || delivered || (!!disposition?.fanout.length && !decided)
     || (!!decision && !decided)
-  const requeue = trigger.human && !queued && !evaluating && unjudged
+  const requeue = !retiredSource(trigger.source) && trigger.human && !queued && !evaluating && unjudged
   return { id: trigger.id, source: trigger.source, actor: view.actor(trigger.actor, trigger.human), human: trigger.human, at: trigger.at,
     text: plain(readable(trigger.text), true),
     preview: preview(trigger.text), url: trigger.url, threads: trigger.threads.map(threadKey), actions: { requeue },
@@ -124,7 +125,7 @@ export function ticketSummary(ticket: Ticket) {
     attention: ticket.attention && { ...ticket.attention, question: markdown(ticket.attention.question) },
       assignments: ticket.assignments.length, inputs: ticket.inputs.length, undelivered: ticket.undelivered.length,
     // Every started Assignment of a Ticket runs in its one shared worker Session.
-    deliveryError: attribute(ticket.delivery?.error), sessionId: ticket.assignments.some(item => item.startedAt)
+    deliveryError: attribute(ticket.delivery?.error), sessionId: ticket.executionTarget !== 'hifox' && ticket.assignments.some(item => item.startedAt)
       ? workerSessionId(ticket.id) : '',
     directory: attribute(ticket.execution?.directory), summary: latestReport(ticket)?.summary ?? '', createdAt: ticket.createdAt,
     updatedAt: ticket.updatedAt }

@@ -7,6 +7,18 @@ import { usePanel, mount, remount, all, find, tab, click, type, text, field, at 
 import { MEMBER, server, ticketSummary, threadSummary } from './fixtures/panel-server.ts'
 
 usePanel()
+it('shows the selected HiFox Agent and confirmed task link and Run on its ticket', async () => {
+  const taskUrl = 'https://app.hifox.com/fshows/task/FSH-1'
+  server.ticketDetails.t1 = { ...server.ticketDetails.t1!,
+    hifox: { taskUuid: 'task-1', taskUrl, conversationId: 'conversation-1', runId: 'run-1',
+      agentId: 'agent-1', agentName: 'Operations Agent' } }
+  at({ page: 'execution', id: 't1' })
+  await mount()
+  expect(all('a').find(link => link.textContent === 'task-1')?.getAttribute('href')).toBe(taskUrl)
+  expect(text()).toContain('run-1')
+  expect(text()).toContain('Operations Agent')
+})
+
 it('lists Tickets under Execution by who they wait on, with the Executor state and its pause as an action', async () => {
   server.tickets.open = [ticketSummary(), ticketSummary({ id: 't2', title: '执行中的工单', threads: [{ key: 'github:7',
     source: 'github', title: '#7 x', facts: { number: { value: '#7' }, autoMerge: { label: { zh: '自动合并', en: 'Auto-merge' },
@@ -70,7 +82,7 @@ it('shows a Ticket with its stage, its Mandate details with the Trigger and Deci
     'https://applink.feishu.cn/client/chat/open?openChatId=oc_1'], ['GitHub #42', 'https://github.com/acme/widgets/issues/42']])
   await click(zh['term.environment'])
   expect(all('.dt-disclosure-body .dt-table tr').map(row => row.textContent)).toEqual(['DSH_SUPERAGENT_DIR/w/t1',
-    'DSH_SUPERAGENT_GITHUB_NUMBER—'])
+    'DSH_SUPERAGENT_FEISHU_BOT—'])
   await click(document.querySelector<HTMLElement>('.dt-trigger-link')!)
   expect(tab(zh['tab.trigger']).getAttribute('aria-selected')).toBe('true')
 })

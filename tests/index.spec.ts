@@ -1,12 +1,17 @@
 import { expect, it, vi } from 'vitest'
 import { Config, type Machine } from '../src/deployment.ts'
 import { apply } from '../src/index.ts'
+import type { HiFoxPilot } from '../src/executor/hifox-port.ts'
+
+vi.mock('../src/infra/pilot-cli.ts', { spy: true })
+import { pilotCommand } from '../src/infra/pilot-cli.ts'
 
 // Stub Runtime to capture the resolved Machine settings and restart callback.
-const runtimes = vi.hoisted(() => [] as { machine: Machine; restart: () => void }[])
+const runtimes = vi.hoisted(() => [] as { machine: Machine; restart: () => void; pilot?: HiFoxPilot; detail?: string }[])
 vi.mock('../src/app/runtime.ts', () => ({ Runtime: class {
   ready = Promise.resolve()
-  constructor(_ctx: unknown, readonly machine: Machine, readonly restart: () => void) { runtimes.push(this) }
+  constructor(_ctx: unknown, readonly machine: Machine, readonly restart: () => void,
+    readonly pilot?: HiFoxPilot, readonly detail?: string) { runtimes.push(this) }
   configured() { return true }
   async stop() {}
 } }))
@@ -56,7 +61,22 @@ it('asks DSH to read its settings entry again once a restart it started finished
 
 it('refuses keys of the previous configuration before registering anything', async () => {
   const { ctx } = context()
-  await expect(apply(ctx as never, Config({ stateDir: '/srv/state', github: { cli: 'gh' } } as never))).rejects.toThrow('github (now on the GitHub Source)')
+  await expect(apply(ctx as never, Config({ stateDir: '/srv/state', github: { cli: 'gh' } } as never))).rejects.toThrow('configuration has keys it does not use: github')
   expect(ctx.on).not.toHaveBeenCalled()
   expect(ctx.inject).not.toHaveBeenCalled()
+})
+
+it('mounts the standard HiFox gateway and stopped listener from explicit plugin settings', async () => {
+  const { ctx } = context()
+  await apply(ctx as never, Config({ stateDir: '/srv/state', hiFoxEnabled: true }))
+  expect(runtimes.at(-1)).toMatchObject({ pilot: undefined, detail: expect.stringContaining('Configure the canonical DWS') })
+  await apply(ctx as never, Config({ stateDir: '/srv/state', hiFoxEnabled: true,
+    hiFoxCli: process.execPath, dingTalkCli: process.execPath,
+    hiFoxSpace: 'space-test', hiFoxAgent: 'agent-test',
+    dingTalkConversationId: 'chat-test', dingTalkProfile: 'corp:user',
+  }))
+  const pilot = runtimes.at(-1)?.pilot
+  expect(pilot?.scope).toEqual({ space: 'space-test' })
+  expect(pilotCommand).not.toHaveBeenCalled()
+  expect(pilot?.createDingTalkListener?.(() => 'stored').status()).toEqual({ state: 'stopped' })
 })

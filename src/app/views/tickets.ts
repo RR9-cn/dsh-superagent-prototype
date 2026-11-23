@@ -50,7 +50,10 @@ export function ticketRow(view: Snapshot, ticket: Ticket) {
 /** Executor slot utilization: `running` worker Sessions in an active turn (which occupy slots and are interrupted by a restart), and tickets `queued` for a slot. */
 export interface ExecutorLoad { running: number; queued: number }
 export function executorLoad(store: Store, running: number): ExecutorLoad {
-  const queued = (ticket: Ticket) => { const stage = ticketStage(ticket); return stage.stage === 'working' && stage.action === 'queued' }
+  const queued = (ticket: Ticket) => {
+    const stage = ticketStage(ticket)
+    return ticket.executionTarget !== 'hifox' && stage.stage === 'working' && stage.action === 'queued'
+  }
   return { running, queued: store.tickets.open().filter(queued).length }
 }
 export function ticketDetail(host: ViewHost, id: string) {
@@ -75,8 +78,8 @@ export function ticketDetail(host: ViewHost, id: string) {
     basis: basisFacts(ticket.mandate.basis, view.rule), paused: store.settings().paused,
     channels: ticket.channels.map(channel => channelLink(view, channel)),
     decision: decision ? decisionView(view, decision) : undefined,
-    // Every started Assignment ran in the ticket's one worker Session. A running assignment whose worker reported a non-progress state has finished its turn unless a human response resumed the ticket.
-    assignments: ticket.assignments.map(assignment => ({ ...assignment, ...assignment.startedAt ? { ref: workerSessionId(ticket.id) } : {},
+    assignments: ticket.assignments.map(assignment => ({ ...assignment,
+      ...(assignment.startedAt && ticket.executionTarget !== 'hifox' ? { ref: workerSessionId(ticket.id) } : {}),
       ...assignment.state === 'running' && assignment.report && assignment.report.state !== 'progress' && stage !== 'working'
         ? { turnEndedAt: assignment.report.at } : {} })),
     inputs: ticket.inputs.slice().reverse().map(input),

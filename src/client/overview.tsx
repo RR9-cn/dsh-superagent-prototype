@@ -7,6 +7,7 @@ import { setupPage, settingsRoute, type Route } from './route.ts'
 import { TicketLine } from './rows.tsx'
 import { healthText, localized, reasonLabel, valueLabel, readableMarkers } from './text.ts'
 import { CheckSetupButton, ConfirmButton, Hint, LoadState, Section, SetupMessage } from './widgets.tsx'
+import { HiFoxOverview } from './hifox.tsx'
 
 function ProblemLine({ problem, onChanged }: { problem: Problem; onChanged: () => Promise<void> }) {
   const { t, call, navigate } = usePanel()
@@ -72,6 +73,7 @@ export function OverviewPage() {
     onClick={() => navigate(route)}>{t('details')}</button>
   return <>
     {error && <LoadState error={error} loading={false} />}
+    <HiFoxOverview />
     <Section title={t('pendingTickets')} count={data.person.length}>
       {data.person.length ? <ul className="dt-list dt-cards">{data.person.map(ticket => <TicketLine key={ticket.id} ticket={ticket} question
         onChanged={reload} />)}</ul>

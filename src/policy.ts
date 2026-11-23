@@ -108,7 +108,7 @@ export type SettingsBlock = 'policy' | 'eval' | 'executor' | `source:${string}`
 export type SettingsSave = SettingsBlock | 'pause'
 export type SettingsOrigin = 'panel' | 'tool' | 'sync'
 
-export const POLICY_REVISION = 'mandate-v3'
+export const POLICY_REVISION = 'mandate-v4'
 /**
  * Compute a version hash for settings that affect work authorization.
  * Changes to models, concurrency, pause state, or polling intervals do not invalidate existing decisions.
@@ -194,7 +194,9 @@ export function settingsPolicy(settings: Settings, sources: SourceScope): Policy
       const scope = listened(sources, trigger.source, trigger.meta)
       const row = scope.listened ? scope.row : undefined
       const recorded = { source: trigger.source, scope: trigger.meta, ...row === undefined ? {} : { row }, ...allowed ? { sender: senderName(allowed) } : {} }
-      if (allowed && trigger.addressed) return { admissible: true, strength: 'explicit', basis: { ...recorded, via: 'addressed', addressed: trigger.addressed } }
+      if (trigger.addressed && (allowed || (scope.listened && scope.acceptsAnyAddressedSender))) {
+        return { admissible: true, strength: 'explicit', basis: { ...recorded, via: 'addressed', addressed: trigger.addressed } }
+      }
       const cell = admissionCell(!!allowed, !!trigger.addressed)!
       // Unaddressed messages only use the admission table when the Source observes all messages in that scope.
       const receivable = !!trigger.addressed || (scope.listened && scope.observed)
@@ -216,6 +218,7 @@ export function settingsPolicy(settings: Settings, sources: SourceScope): Policy
       const { source } = basis
       const current = source && basis.scope ? listened(sources, source, basis.scope) : undefined
       if (current && !current.listened) return false
+      if (basis.via === 'addressed' && current?.listened && current.acceptsAnyAddressedSender) return true
       const rulesOn = (rules: string[] | undefined) => (rules ?? []).every(id => settings.policy.rules.some(rule => rule.enabled && rule.id === id))
       // Explicit follow-ups remain valid; inferred follow-ups require auto mode and enabled matched rules.
       if (basis.via === 'followup') return mandate.strength === 'explicit' || (mode === 'auto' && rulesOn(basis.rules))

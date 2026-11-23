@@ -8,12 +8,12 @@ A team can edit three team sections, add skills, and override every built-in sys
 
 | Section | Holds |
 | --- | --- |
-| Communication | When to message people, how messages read, the line that begins every GitHub message (`This is by an automated agent, not a human` by default), how to handle reviews, and which ordinary accounts are review bots |
+| Communication | When to message people and how to communicate results and blockers |
 | Ticket scope | When a Ticket goes on and when it stops with a draft |
-| Delivery requirements | Evidence in pull requests, the auto-merge condition with its line threshold, and the commit author; without one, the Executor commits as the agent account's no-reply address |
-| Team skills | Knowledge the agents load when they need it, such as an `identities` skill that says which Feishu user is which GitHub account |
+| Delivery requirements | Verification, deliverables and the commit identity when work needs a commit |
+| Team skills | Knowledge that agents can load when needed |
 
-The built-in text covers the roles, tool usage, host mechanics, authorization rules, and the GitHub and Feishu skills. It refers to the team sections by their headings instead of repeating them.
+The built-in text covers the roles, tool usage, host mechanics, authorization rules and the Feishu skill. It refers to the team sections by their headings instead of repeating them.
 
 ### Built-in parts and templates
 
@@ -24,7 +24,7 @@ Overrides use these keys:
 | Shared instructions and roles | `runtime/shared`, `runtime/orchestrator`, `runtime/worker` |
 | Working instructions | `runtime/subscriptions`, `runtime/replies`, `runtime/dispatch`, `runtime/work`, `runtime/admission` |
 | Handoff instructions | `runtime/handoff/orchestrator`, `runtime/handoff/worker` |
-| Source skills | `skill/feishu`, `skill/github` |
+| Source skills | `skill/feishu` |
 | Generated sections | `runtime/environment`, `runtime/policy`, `runtime/policy/none` |
 
 The generated sections are editable templates. They must retain these placeholders:
@@ -85,8 +85,6 @@ These apply [000 Philosophy](000-philosophy.md) to the agents:
 - **Honest delivery.** Opening a pull request is not readiness; a draft is marked unfinished; a UI change without a real before screenshot is not ready.
 - **A person's pause holds** across follow-ups, new Executor Sessions and restarts until a person lifts it. Automatic feedback never resumes paused work.
 - **Examples only show format.** An example sentence is not a fact the agent may claim.
-- **Handle reviews by outcome.** A fixed and verified comment is resolved silently; a declined one gets one sentence of reason. An automated reviewer's thread is resolved once it has an answer, and each automated reviewer gets at most three rounds per pull request.
-- **Yield to duplicate work.** When a person's branch or pull request already contains the Ticket's change, the Executor closes its own pull request with one sentence pointing to theirs.
 
 ## Versions
 

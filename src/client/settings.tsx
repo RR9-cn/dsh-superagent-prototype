@@ -1,8 +1,9 @@
-/** Settings tab shell routing between stage settings (Sources, Eval, Execution), Prompts, and Deployment. */
+/** Settings tab shell routing between stage settings, HiFox, Prompts, and Deployment. */
 import type { StateView } from './api.ts'
 import { DeploymentPage, type DeploymentForm } from './deployment.tsx'
 import { EvalSettings } from './eval.tsx'
 import { ExecutionSettings } from './execution.tsx'
+import { HiFoxSettings } from './hifox.tsx'
 import { PromptsPage } from './prompts.tsx'
 import { usePanel } from './provider.tsx'
 import { SETTINGS_GROUPS, settingsRoute, type SettingsGroup } from './route.ts'
@@ -19,6 +20,7 @@ export function SettingsPage({ group, query, state, deploymentForm }: {
       case 'source': return <SettingsProvider><SourceSettings {...query.source ? { focus: query.source } : {}} /></SettingsProvider>
       case 'eval': return <SettingsProvider><EvalSettings version={query.version} /></SettingsProvider>
       case 'execution': return <SettingsProvider><ExecutionSettings /></SettingsProvider>
+      case 'hifox': return <HiFoxSettings form={deploymentForm} />
       case 'prompts': return <PromptsPage />
       case 'deployment': return <DeploymentPage setup={state.setup} form={deploymentForm} />
     }

@@ -5,10 +5,10 @@ Use this guide to install, configure and operate dsh-superagent. It covers accou
 ## What runs
 
 - **A dedicated DeepSeek Harness profile**, called `superagent` in this guide. Create it from the Web profile template. It loads the bundle and serves its panel on `127.0.0.1`. Keep it separate from the profile you work in: the plugin changes process-wide `PATH` and git settings, and its process needs independent restarts and upgrades.
-- **An agent GitHub account.** The agent comments, pushes branches and opens pull requests as this account, through a GitHub CLI signed in only as that account.
-- **Optional:** a Feishu bot for chat requests.
+- **Optional:** a Feishu bot for chat requests and local DSH execution.
+- **Optional:** a DingTalk and HiFox pilot for remote execution. Configure it in **Settings → HiFox** and start the DingTalk listener explicitly.
 
-Plugin configuration holds the state directory and machine limits. Use the panel for everything else: Sources for the repository and accounts, Policy for allowed lists, and Execution for worker directories and commands.
+Plugin configuration holds the state directory and machine limits. Use the panel for everything else: Sources for channel accounts, Policy for allowed lists, and Execution for worker directories and commands.
 
 ### Permissions and isolation
 
@@ -21,30 +21,11 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 ## Prerequisites
 
 - Node.js 22.19+ or 24+, pnpm, git 2.32+, Python 3.8+ and tmux
-- GitHub CLI (`gh`) 2.48 or later. Source CLI fields must point to `gh` or `lark-cli` wrappers; the host relies on their subcommands and output formats.
-- A repository on github.com; GitHub Enterprise Server is not supported. To create a checkout per Ticket, keep a local clone from which the prepare command can add worktrees. Install `git-lfs` if that repository uses Git LFS.
+- For repository-based workers, a local Git checkout which the prepare command can use to create worktrees. Install `git-lfs` when the checkout uses Git LFS.
 - A model provider configured for DeepSeek Harness. dsh-superagent uses the profile's default model unless the Eval or Execution settings name another.
 - For Feishu: `lark-cli` (tested with 1.0.90) and a Feishu or Lark app with a bot
 
 ## Accounts
-
-### Agent GitHub account
-
-1. Create a GitHub user account for the agent and give it write access to the repository. A GitHub App cannot be the agent, because dsh-superagent reads the account's notifications.
-2. Give it a GitHub CLI that uses only its own credentials:
-
-   ```sh
-   mkdir -p ~/.local/bin
-   cat > ~/.local/bin/gh-agent <<'EOF'
-   #!/bin/sh
-   GH_CONFIG_DIR="$HOME/.config/gh-agent" exec gh "$@"
-   EOF
-   chmod +x ~/.local/bin/gh-agent
-   gh-agent auth login
-   gh-agent api user --jq .login
-   ```
-
-   Sign in as the agent account; the last command prints its login. dsh-superagent reads the login the same way.
 
 ### Feishu bot (optional)
 
@@ -92,6 +73,7 @@ Copy [examples/profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) t
 
 | Key | Required | Meaning |
 | --- | --- | --- |
+| `repositoryPath` | no | Absolute path to a local Git worktree whose committed HEAD can be read during admission. |
 | `stateDir` | yes | Absolute path: the database, the lock, the command shims in `worker-bin`, the agent's git configuration and, by default, the Ticket directories in `work`. Back it up before upgrades |
 | `promptMaxChars`, `admissionContextMaxPages`, `admissionContextTimeoutMs` | no | The largest saved prompt configuration, and how many Thread pages one assessment reads within what time |
 
@@ -144,17 +126,26 @@ Check dsh-superagent: run `scripts/dsh-superagent --profile superagent status` i
 
 Setup must succeed before polling or work starts. Overview lists missing requirements and links to their settings. A settings change runs setup again. If you fix something outside the application, such as CLI authentication, choose **Check again**.
 
-1. **Sources.** Set the GitHub repository (`owner/name`) and agent CLI, for example `/home/me/.local/bin/gh-agent`. Requests normally arrive through the agent account's notifications. A new Issue or comment mentioning the account arrives on the next poll; adding a mention by editing an existing Issue body does not. Post a new comment instead. For Feishu, set the bot CLI, chats, each chat's receive-all or mentions-only mode, and whether to receive direct messages.
-2. **Policy.** The two example rules can be edited or removed. Under **On each Source**, add the GitHub accounts and Feishu users who may ask for work; until a list has someone, no request can become a Ticket. With Feishu, a chat can be chosen to sync the list from, at startup and on **Sync now**.
-3. **Execution.** The directory root and a prepare command. To give each Ticket a checkout of the repository:
+1. **Sources.** For Feishu, set the bot CLI, the chats it may receive, each chat's listen mode, and whether direct messages are enabled. The DingTalk pilot's listener state is visible separately from the DSH receiver state on Overview.
+2. **Policy.** Add the allowed requesters for each source. Feishu can sync its allowlist from a configured chat.
+3. **Execution.** Set the directory root and, if a local checkout is needed, an optional prepare command. For example:
 
    ```sh
-   git -C /home/me/src/widgets fetch --no-tags "https://github.com/$DSH_SUPERAGENT_GITHUB_REPOSITORY.git" "${DSH_SUPERAGENT_GITHUB_PR_HEAD:-HEAD}:refs/dsh-superagent/$DSH_SUPERAGENT_TICKET" &&
-   git -C /home/me/src/widgets worktree add -b "agent/$DSH_SUPERAGENT_NAME" "$DSH_SUPERAGENT_DIR" "refs/dsh-superagent/$DSH_SUPERAGENT_TICKET"
+   git -C /home/me/src/widgets worktree add -b "agent/$DSH_SUPERAGENT_NAME" "$DSH_SUPERAGENT_DIR" HEAD
    ```
 
-   List personal CLIs, such as one signed in to your own account, as blocked commands.
-4. **Prompts.** Set the team sections: the GitHub disclosure line, review bots, the commit author and the auto-merge condition.
+   List any operational commands workers should not invoke by name as blocked commands.
+4. **Prompts.** Set the team's delivery requirements and the commit identity for repository work.
+
+### HiFox and DingTalk pilot
+
+1. In **Settings → HiFox**, select the HiFox Space and enter the authenticated DWS profile. If a CLI is outside the app's PATH, enter its absolute path under **CLI paths**. Maintain each available Agent's responsibilities, execution tools and permissions in HiFox.
+2. Enable HiFox and save. The plugin reloads the configuration. The listener starts separately from the plugin. Verified group mentions and direct requests from any sender in the receiving scope are eligible for routing.
+3. Choose **Start DingTalk listener** in Overview or HiFox settings. Wait for the live listener to say **Listening**. Choose **Stop DingTalk listener** to close the subscription. Check the live listener status after a plugin restart.
+
+The listener subscribes to incoming group and direct messages for the profile. Ordinary group messages supply conversation context. A verified group mention or an incoming direct message can enter routing if the sender is authorized. The DSH main session reads the original request, its direct quote, nearby messages preceding it in the same conversation, and the Space's current Agent roster. It selects an Agent for the request and records the selection on the DSH Ticket. Follow-ups on that Ticket use its recorded Agent. Requests that need clarification or have no suitable Agent stay unassigned for review.
+
+Automatic quoted replies are a separate opt-in. DSH verifies the selected Agent, HiFox Task, conversation, Run and input revision, then sends the verified result as a reply to the original message. An existing reply opt-in with a legacy conversation ID remains limited to that conversation.
 
 ### Management API
 
@@ -166,14 +157,18 @@ API saves have the panel's permissions. They can change execution environment an
 
 Agents may rely on these routes and fields. The other routes in `src/app/api.ts` serve the panel and change with it.
 
+`GET hifox/agents` lists the configured Space's currently eligible HiFox Agents and their available profile metadata. The roster is read-only.
+
 | Request | Answer |
 | --- | --- |
-| `GET state` | What every page reads: `setup`, with `problem` and `feishuProblem`, each `null` or a setup problem with `place`, `code`, `values` and `detail`, and `accounts` once setup resolved them; `health`, an entry per part, below, with `state` (`starting`, `ready`, `paused` or `error`), `detail` and `at`; `load`, the Executor Sessions `running`, the Tickets `queued` and `maxWorkers`; `paused`; and `masterId` |
+| `GET state` | What every page reads: `setup`, with `problem` and `feishuProblem`, each `null` or a setup problem with `place`, `code`, `values` and `detail`, and `accounts` with local repository and Feishu details once setup resolves them; the HiFox status; `health`, an entry per part, below, with `state` (`starting`, `ready`, `paused` or `error`), `detail` and `at`; `load`, the Executor Sessions `running`, the Tickets `queued` and `maxWorkers`; `paused`; and `masterId` |
 | `GET settings` | `blocks`: `policy`, `eval` and `executor`, each with its `value` and its `revision`; `sources`: the Source instances, each with `id`, `kind`, `installed`, its block's `value`, `{"enabled": …, "config": {…}}`, and `revision`, its kind's form, and its setup `problem` when it has one; `policyVersion`; and `environment`, the execution environment's `root` and `variables` |
 | `GET sources` | Each Source's status: `state` (`missing`, `off`, `error`, `setup`, `starting`, `paused` or `ready`), the `health` of its parts, its setup `problem`, the last day's `stats`, the Triggers it `filtered` in that day, and the messages it `dropped` in that day, newest drop first, each with its `channel`, `preview`, `ticket` (`id` and `title`) when it was for one, its `thread` when the store has it, and `dropped.at` and `dropped.reason`, `channelGone` or `channelIgnored` |
 | `PUT settings/<block>` with `{"value": …, "revision": n}` | Saves one block: `saved`, the block's new `revision`, `policy_changed` and `restarting`. `value` is the whole block, as `GET settings` holds it; a missing key takes its default |
 | `POST executor/pause` with `{"paused": true}` or `false` | Pauses or resumes processing: `paused` |
 | `POST setup/check` | Runs setup again by restarting dsh-superagent: `restarting: true`. Refused when setup has nothing to fix |
+| `GET hifox/listener` | Live DingTalk subscription state and any diagnostic. `GET state` includes the same listener state under `hifox.listener` |
+| `POST hifox/listener/start`, `POST hifox/listener/stop` | Starts or stops the managed subscription and returns its state |
 | `POST policy-sync/<source id>` | Syncs that Source's allowed list now: `policy`, the Source's part as saved |
 | `GET prompts`, `PUT prompts` with `{"config", "baseRevision"}` | Reads the prompt configuration: `current`, with its `revision` and `config`, `defaults`, `sections`, the team sections in the order Sessions read them, `skillName`, the pattern of a team skill's name, `builtin`, the names a team skill cannot take, and `skillPrefix`, which Sessions load a skill's name under. Or saves it: the new `revision` |
 | `POST tickets/<id>/retry`, `POST tickets/<id>/stop` | Retries or stops a Ticket, as the panel does |
@@ -187,7 +182,7 @@ Health entries are grouped by responsibility:
 | `evals` | Unavailable Evals from the last hour with no later judgement or dismissal |
 | `assessment`, `launch`, `delivery`, `relay`, `notice`, `reply` | Stored work described in [003 Execution](003-execution.md); delivery counts waiting work, while reply covers Channel messages |
 | `worker` | Executor Session event handling; appears after its first failure |
-| `github`, `feishu`, `history` | Source polling, events and history recovery |
+| `feishu`, `history` | Source polling, events and history recovery |
 | `sync:<source id>` | Allowed-list synchronization |
 
 A refusal has a status and `error`, its English text:
@@ -199,36 +194,29 @@ A refusal has a status and `error`, its English text:
 
 The blocks:
 
-- `source:github`, `source:feishu`: `{"enabled": true, "config": {…}}`. GitHub's config has `repository` and `cli`, and the switches `observeIssues`, `observePulls`, `observeComments` and `observeCi`, off by default, which receive every new Issue, new pull request and comment in the repository and the default branch's CI; Feishu's has `cli`, `chats` as `[{"chatId": "oc_…", "name": "…", "listen": "mentions"}]` (or `"all"`), `directMessages`, and `otherChats` as `"none"` or `"mentions"`.
-- `policy`: `{"rules": […], "sources": {"github": {"allowed": [{"id": "<login>"}], "bots": [{"id": "dependabot[bot]"}]}, "feishu": {"allowed": [{"id": "ou_…", "name": "…"}], "syncChat": "oc_…", "admission": {"oc_…": {"unlistedAddressed": "explicit"}}}}}`. `bots` lists the bots whose messages may become inferred candidates. An `admission` row is keyed by chat id, `other` or `direct` for Feishu, and by `issues`, `pulls`, `comments` or `ci` for GitHub; an unset cell takes its default (see [002 Authorization](002-authorization.md)).
+- `source:feishu`: `{"enabled": true, "config": {…}}`. The config has `cli`, `chats` as `[{"chatId": "oc_…", "name": "…", "listen": "mentions"}]` (or `"all"`), `directMessages`, and `otherChats` as `"none"` or `"mentions"`.
+- `policy`: `{"rules": […], "sources": {"feishu": {"allowed": [{"id": "ou_…", "name": "…"}], "syncChat": "oc_…", "admission": {"oc_…": {"unlistedAddressed": "explicit"}}}}}`. An admission row is keyed by chat ID, `other` or `direct`. An unset cell takes its default (see [002 Authorization](002-authorization.md)).
 - `eval`: `mode`, `timeoutSeconds` and `model`.
 - `executor`: `model`, `maxWorkers`, `directory`, `prepare` and `blockedCommands`. The processing pause is a setting of its own, `paused`, which `POST executor/pause` sets.
 
-Changing a repository or CLI runs the corresponding setup check first. A failed check returns 400 with details in `setup`. A successful account change, or any save while setup is pending, returns `restarting: true`. The API is temporarily unavailable while the application restarts.
-
-```sh
-api=http://127.0.0.1:3082/orchestrator/api
-rev=$(curl -s -H 'x-orchestrator-request: 1' $api/settings | jq '.sources[] | select(.id == "github") | .revision')
-curl -s -X PUT -H 'x-orchestrator-request: 1' -H 'content-type: application/json' $api/settings/source:github \
-  -d "{\"value\": {\"enabled\": true, \"config\": {\"repository\": \"acme/widgets\", \"cli\": \"$HOME/.local/bin/gh-agent\"}}, \"revision\": $rev}"
-```
+Changing the Feishu CLI runs its setup check first. A failed check returns 400 with details in `setup`. A successful account change can return `restarting: true`. Read a fresh revision after restarting.
 
 ## Setup checks
 
 Setup uses the DeepSeek Harness subprocess service, as worker shells do. It removes environment variables whose names contain KEY, PASSWORD, SECRET or TOKEN.
 
-Setup verifies the GitHub repository and the agent's push access, writes the worker environment, and checks that git uses only the agent credentials for github.com. A Feishu setup failure disables only the Feishu Source.
+Setup prepares the worker environment and checks the Feishu bot if configured. A Feishu setup failure affects the Feishu source. The standard plugin builds the HiFox adapter from the desktop profile's pilot configuration.
 
 The process environment that setup writes:
 
-- **Command shims** in `<stateDir>/worker-bin`, first on `PATH`: `gh` runs the agent's CLI; `lark-cli` runs the bot's CLI; blocked commands fail. A shim removes its own directory from `PATH` before it runs its target.
-- **git configuration** in `<stateDir>/worker-gitconfig`: replaces the operator's global and system git configuration. It selects the agent CLI as the github.com credential helper, rewrites GitHub SSH addresses to HTTPS and defines Git LFS filters. Personal git settings such as an HTTP proxy do not apply. No commit identity is set here, git never prompts for credentials, and `GH_TOKEN` and `GITHUB_TOKEN` are removed.
+- **Command shims** in `<stateDir>/worker-bin`, first on `PATH`: `lark-cli` runs the bot's CLI and blocked commands fail. A shim removes its own directory from `PATH` before it runs its target.
+- **git configuration** in `<stateDir>/worker-gitconfig`: replaces the operator's global and system git configuration. It defines Git LFS filters and prevents interactive credential prompts. Configure an explicit commit identity for work that needs commits.
 
 A file in `worker-bin` or `worker-gitconfig` that dsh-superagent did not write stops setup. A Ticket directory inside a git repository whose own configuration adds credentials fails the Ticket.
 
 ## Try it
 
-From an allowed GitHub account, open an Issue or post a comment containing `@<agent login> <request>`. Within a polling interval (one minute by default), Overview should show a Ticket. The agent acknowledges the request, works in its own Session and directory, and delivers in the original conversation. For Feishu, mention the bot in a configured chat.
+From an allowed Feishu account, mention the bot in a configured chat and check Overview for the resulting Ticket. From DingTalk, send an actionable group mention or direct message and check the Ticket for its HiFox Task and Run.
 
 ## Upgrade
 
@@ -238,6 +226,8 @@ From an allowed GitHub account, open an Issue or post a comment containing `@<ag
 4. Run `scripts/dsh-superagent restart` and inspect its status.
 
 A restart ends running Assignments and starts replacements with recovery notes. Team text and overridden prompt parts are retained; parts without overrides follow the new defaults. Review parts marked **Default updated** after upgrading.
+
+Existing GitHub tickets remain readable, and open work from the retired source is stopped on upgrade. Review any saved prepare commands and prompt overrides that refer to removed GitHub variables or CLI tools before using them for local workers.
 
 A database migrated by a newer version cannot be opened by an older one. Rollback therefore requires the pre-upgrade backup. After upgrading DeepSeek Harness itself, restart the running instance so the panel loads matching artifacts.
 
@@ -251,13 +241,7 @@ Setup problems appear on the overview with a link to the fix, in the panel's lan
 
 | Symptom | Cause and fix |
 | --- | --- |
-| `The agent GitHub CLI is not set.` | Set the agent's CLI on the GitHub card |
-| `The agent GitHub CLI was not found.` | Set the wrapper's absolute path, or a command name on `PATH` |
-| `The agent GitHub CLI cannot read its account` | Sign the wrapper in with `auth login` |
-| `@… cannot read …` or `@… cannot push to …` | Give the agent account write access to the repository |
-| `The GitHub Source names no repository.` | Set the repository, `owner/name`, on the GitHub card |
 | A Ticket fails with `The prepare command failed: …` | The output names the cause, such as a wrong clone path; fix the command, then retry the Ticket |
-| `git does not read the github.com credential configuration dsh-superagent writes` | Install git 2.32 or later |
 | A Ticket fails with `The git configuration of the repository in … sets …` | Remove the named credential or `http.*.extraheader` settings from the clone's `.git/config` |
 | `… was not written by dsh-superagent` | Move the named file out of `<stateDir>/worker-bin` or `<stateDir>/worker-gitconfig`, or choose another `stateDir` |
 | `The bot lark-cli allows user identities` | Point the Feishu Source at a bot-only configuration, as in Feishu bot above |
@@ -271,4 +255,4 @@ Setup problems appear on the overview with a link to the fix, in the panel's lan
 | `dsh-superagent configuration has keys it does not use` (log) | Remove the named keys; the message says where each value lives now |
 | The log says the plugin is incompatible with the running dsh | Install a DeepSeek Harness version within the `engines.dsh` range |
 | The panel shows "Failed to load plugins" after a DeepSeek Harness upgrade | Restart the running instance |
-| Nothing happens after a mention | Check that the author is on the Source's allowed list, the Source is on, and processing is not paused. On GitHub, a mention added by editing an Issue's body is not received; mention the agent in a comment |
+| Nothing happens after a mention | Check that the author is on the Source's allowed list, the Source is on, and processing is not paused. |

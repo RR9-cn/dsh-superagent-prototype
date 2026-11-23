@@ -6,7 +6,6 @@ import { Store } from '../src/app/store.ts'
 import { SettingsSchema } from '../src/policy.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
 import { feishuKind } from '../src/sources/feishu.ts'
-import { githubKind } from '../src/sources/github.ts'
 import { snapshot, threadSummary, ticketSummary, triggerView } from '../src/app/views/records.ts'
 import { basisFacts, ticketDetail } from '../src/app/views/tickets.ts'
 import { threadDetail } from '../src/app/views/threads.ts'
@@ -17,8 +16,6 @@ import { policyHistory } from '../src/app/settings-history.ts'
 import { KV } from '../src/kv.ts'
 import { feishuLink } from '../src/sources/feishu-channel.ts'
 import { feishuChannel, feishuTriggerId } from '../src/sources/feishu-trigger.ts'
-import { githubLink } from '../src/sources/github-channel.ts'
-import { githubChannel } from '../src/sources/github-trigger.ts'
 import { followupOwners, type ChannelRef } from '../src/core/index.ts'
 
 let directory: string
@@ -28,7 +25,7 @@ beforeEach(() => {
   store = new Store(join(directory, 'orchestrator.sqlite'))
 })
 afterEach(() => { store.close(); rmSync(directory, { recursive: true, force: true }) })
-const links = (channel: ChannelRef) => (channel.source === 'feishu' ? feishuLink : githubLink)(channel.address, {})
+const links = (channel: ChannelRef) => channel.source === 'feishu' ? feishuLink(channel.address, {}) : { url: channel.address.url ?? '', label: { zh: channel.source, en: channel.source } }
 const drop = (id: string, channel: ChannelRef, ticketId?: string) => {
   const message = { id, channel, text: id, kind: 'reply' as const, ...ticketId ? { ticketId } : {} }
   store.receipts.add(message)
@@ -42,7 +39,7 @@ it('names the Thread of each dropped message: the one of the Trigger its Channel
   store.threads.save({ key: 'github:42', ref: { source: 'github', id: '42' }, createdAt: '', subscriptions: [], correlated: [], pending: [],
     meta: {} })
   drop('a', feishuChannel('oc_1', 'om_reply'))
-  drop('b', githubChannel(42))
+  drop('b', { source: 'github', thread: 'github:42', address: { number: '42' } })
   // A message whose Trigger and Thread the store no longer has links nowhere.
   drop('c', feishuChannel('oc_2', 'om_gone'))
   expect(Object.fromEntries(droppedReplies({ store, links }).map(item => [item.id, item.thread])))
@@ -54,7 +51,7 @@ function views() {
     github: { allowed: [{ id: 'alice' }] } },
     rules: [{ id: 'copy', name: 'Copy fixes', enabled: true, instruction: 'Fix copy' }] } }))
   const sources = new SourceRegistry(() => store.settings())
-  sources.register(feishuKind); sources.register(githubKind)
+  sources.register(feishuKind)
   return { store, sources, links }
 }
 const at = new Date().toISOString()
@@ -102,14 +99,14 @@ it('states each Source by the first state that holds', () => {
   const host = views()
   const states = (setup: Parameters<typeof sourcesStatus>[2], health: Parameters<typeof sourcesStatus>[1] = {}) =>
     Object.fromEntries(sourcesStatus(host, health, setup).map(source => [source.id, source.state]))
-  expect(states({})).toEqual({ feishu: 'starting', github: 'starting' })
+  expect(states({})).toEqual({ feishu: 'starting' })
   expect(states({}, { feishu: { state: 'ready', detail: '' }, history: { state: 'paused', detail: '' }, github: { state: 'error',
     detail: 'x' } }))
-    .toEqual({ feishu: 'paused', github: 'error' })
+    .toEqual({ feishu: 'paused' })
   const problem = { place: 'deployment', code: 'stateDirUnset', values: {}, detail: '' } as never
   expect(states({ problem }, { feishu: { state: 'ready', detail: '' }, history: { state: 'ready', detail: '' }, github: { state: 'ready',
     detail: '' } }))
-    .toEqual({ feishu: 'setup', github: 'setup' })
+    .toEqual({ feishu: 'setup' })
 })
 
 it('follows the Ticket\'s stage: a blocked Ticket a person answered since is working, with no retry, note or turn end', () => {
@@ -183,7 +180,7 @@ it('says no Source runs when every Source is off, and states a Source missing or
     jira: { enabled: true, config: { site: 'acme' } } } })
   expect(problems(host).map(item => item.kind)).toContain('no-source')
   expect(Object.fromEntries(sourcesStatus(host, {}, {}).map(source => [source.id, [source.state, source.installed]])))
-    .toEqual({ feishu: ['off', true], github: ['off', true], jira: ['missing', false] })
+    .toEqual({ feishu: ['off', true], jira: ['missing', false] })
 })
 
 it('sends text without HTML, entity-encoded tags included, and with images named', () => {

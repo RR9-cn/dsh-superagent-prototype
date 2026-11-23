@@ -41,7 +41,7 @@ export interface SourcePolicyPart<P extends Record<string, unknown>> {
 }
 /** UI link for a channel address; `triggerId` names the Trigger whose own deep link is preferred when available. */
 export interface ChannelLink { url: string; label: Localized; triggerId?: string }
-export type ChannelLinks = Partial<Pick<Deployment, 'repository' | 'feishu'>>
+export type ChannelLinks = Partial<Pick<Deployment, 'feishu'>>
 /** Outbound messaging adapter for a source kind's threads. */
 export interface SourceChannel<C> {
   /** Whether a reply may still go to `address`; without it, every address may receive replies. */
@@ -96,6 +96,8 @@ export interface SourceKind<C extends Record<string, unknown> = Record<string, u
   health: string[]
   /** Listening rule for a trigger (or recorded Mandate basis) of this kind; kinds without `scope` listen to everything they produce and observe none of it. */
   scope?(input: { meta: Record<string, unknown> }, config: C): ScopeResult
+  /** Give addressed human requests explicit strength without a sender allowlist. */
+  acceptsAnyAddressedSender?: true
   /** Outbound reply adapter; kinds without `channel` produce no replies or channel checks. */
   channel?: SourceChannel<C>
   /** Bounded context reader for assessments; assessments of a kind without `threadContext` read none. */
@@ -113,3 +115,6 @@ export interface SourceKind<C extends Record<string, unknown> = Record<string, u
 }
 
 export interface SourceInstance<C extends Record<string, unknown> = Record<string, unknown>> { id: string; kind: string; enabled: boolean; config: C }
+
+/** Source identifiers retained only for reading legacy data. */
+export const retiredSource = (id: string): boolean => id === 'github' || id === 'github-issue'

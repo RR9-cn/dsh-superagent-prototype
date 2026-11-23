@@ -153,6 +153,17 @@ export function TicketPage({ id }: { id: string }) {
     {data.deliveryError && <p className="dt-banner dt-danger dt-mono">
       <span className="dt-banner-label">{t('deliveryFailedPrefix')}</span>{data.deliveryError}
     </p>}
+    {data.hifox && <Section title="HiFox">
+      <KeyValues rows={[
+        ...(data.hifox.agentId ? [[t('hifoxAssignedAgent'), <span title={data.hifox.agentId}>
+          {data.hifox.agentName ?? data.hifox.agentId}</span>] as [string, ReactNode]] : []),
+        ...(data.hifox.taskUuid ? [[t('hifoxTask'), data.hifox.taskUrl
+          ? <ExternalLink href={data.hifox.taskUrl}><span className="dt-mono">{data.hifox.taskUuid}</span></ExternalLink>
+          : <span className="dt-mono">{data.hifox.taskUuid}</span>] as [string, ReactNode]] : []),
+        ...(data.hifox.runId ? [[t('hifoxRun'), <span className="dt-mono">{data.hifox.runId}</span>] as [string, ReactNode]] : []),
+      ]} />
+      {!data.hifox.taskUuid && <Hint>{t('hifoxNoTask')}</Hint>}
+    </Section>}
     <MandateDetails ticket={data} actor={actor} />
     {undelivered.length > 0 && <Section title={t('undeliveredInputs')} count={undelivered.length}>
       <Hint>{data.deliveryError ? t('inputRetryHint') : data.paused ? t('inputPausedHint') : t('inputWaitingHint')}</Hint>
@@ -175,7 +186,7 @@ export function TicketPage({ id }: { id: string }) {
       </Details>}
       <Details icon="message" title={t('term.channel')}>
         <ul className="dt-plain-list">{data.channels.map((item, index) => <li key={index}>
-          <ExternalLink href={item.url} icon={item.source === 'github' ? 'pull' : 'message'}>{localized(t, item.label)}</ExternalLink>
+          <ExternalLink href={item.url} icon="message">{localized(t, item.label)}</ExternalLink>
         </li>)}</ul>
       </Details>
       {data.inputs.length > undelivered.length && <Details icon="inbox" title={t('deliveredInputs',

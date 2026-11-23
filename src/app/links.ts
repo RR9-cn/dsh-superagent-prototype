@@ -3,6 +3,7 @@ import type { Candidate, Ticket, Trigger } from '../core/index.ts'
 import type { Commands } from '../infra/commands.ts'
 import { readFeishuLink } from '../sources/feishu-read.ts'
 import { feishuRef, feishuSettings } from '../sources/feishu.ts'
+import { DINGTALK } from '../sources/dingtalk.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
 import { triggerMessage } from '../executor/dsh.ts'
 import { relatedTickets, ticketCard, triggerCard } from './cards.ts'
@@ -66,6 +67,7 @@ export async function candidateCard(host: LinkHost, candidate: Candidate) {
     mode: settings.eval.mode, ...others.length ? { batch: others.map(trigger => triggerCard(trigger)) } : {},
     ...handedBack.length ? { handed_back: handedBack } : {}, ...relatedTickets(candidate.tickets),
     ...(delivered.length ? { delivered_to: delivered } : {}), ...(referenced.length ? { referenced_tickets: referenced.map(ticketCard) } : {}),
-    next_action: candidate.strength === 'explicit' ? 'Route it with orchestrator_route as dispatch says: accept, attach, stop or ignore.'
+    next_action: primary.source === DINGTALK ? 'Read orchestrator_dingtalk_context. For new actionable work, choose the matching Agent from orchestrator_hifox_agents and pass its ID to orchestrator_route. Use manual when no suitable Agent can be selected.'
+      : candidate.strength === 'explicit' ? 'Route it with orchestrator_route as dispatch says: accept, attach, stop or ignore.'
       : 'Ignore it with orchestrator_route if the card shows it touches no enabled rule; else assess it with orchestrator_eval, orchestrator_eval_read, then orchestrator_eval_decide.' }
 }

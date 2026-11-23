@@ -2,6 +2,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-settings'
 import { Runtime } from './app/runtime.ts'
+import { desktopHiFox } from './app/hifox-desktop.ts'
 import { Config, machineOf, type DeploymentConfig } from './deployment.ts'
 
 export const name = 'dsh-superagent'
@@ -18,10 +19,15 @@ export async function apply(ctx: Context, config: DeploymentConfig): Promise<voi
   const restart = (): void => {
     ctx.fiber.restart().then(() => { ctx.get('settings')?.describe() }).catch((error: unknown) => { ctx.logger.error('dsh-superagent restart failed: %s', String(error)) })
   }
-  const runtime = new Runtime(ctx, machine, restart)
-  ctx.effect(() => async () => { await runtime.stop() })
+  const lifetime = new AbortController()
+  const { pilot, detail } = await desktopHiFox(config, lifetime.signal)
+  const runtime = new Runtime(ctx, machine, restart, pilot, detail)
+  ctx.effect(() => async () => { lifetime.abort(); await runtime.stop() })
   await runtime.ready
   ctx.logger.info(runtime.configured() ? 'dsh-superagent ready; the Superagent sidebar entry opens the management panel' : `dsh-superagent is waiting for setup: ${runtime.setupProblem?.detail ?? ''}`)
 }
 export type { Deployment, DeploymentConfig } from './deployment.ts'
+export { Runtime, machineOf }
+export type { HiFoxPilot, HiFoxGateway, HiFoxScope, HiFoxWorkOrder, RunObservation } from './executor/hifox-port.ts'
+export type { DingTalkMessage, DingTalkIntakeResult } from './sources/dingtalk.ts'
 export * from './core/index.ts'

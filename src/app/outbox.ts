@@ -2,6 +2,7 @@
 import type { OutboundMessage, Outbox as OutboxPort, ReplyStatus } from '../core/index.ts'
 import type { Commands } from '../infra/commands.ts'
 import { checkedImText } from '../infra/text.ts'
+import { retiredSource } from '../sources/kind.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
 import { FAILURES_BEFORE_ERROR, Later, type Effects } from './effects.ts'
 import type { Store } from './store.ts'
@@ -40,6 +41,7 @@ export class Outbox implements OutboxPort {
     const { store, sources, commands } = this.host
     const receipt = store.receipts.get(id)
     if (receipt?.status !== 'pending') return
+    if (retiredSource(receipt.channel.source)) { store.receipts.settle(receipt, 'channelGone'); return }
     if (!sources.instance(receipt.channel.source)?.enabled) throw new Later('The Source is off or not installed')
     // Hold later messages for the same ticket and conversation behind an earlier pending message until it exceeds the failure threshold.
     if (store.receipts.behind(id, FAILURES_BEFORE_ERROR)) throw new Later('An earlier message of this ticket to this conversation waits')

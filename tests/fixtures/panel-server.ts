@@ -16,9 +16,7 @@ import { SETUP_FIELDS } from '../../src/deployment.ts'
 import { EvalConfigSchema, ExecutorConfigSchema, PolicyConfigSchema, SettingsSchema } from '../../src/policy.ts'
 import { SetupError, type SetupCode } from '../../src/setup.ts'
 import { feishuChannel } from '../../src/sources/feishu-trigger.ts'
-import { githubChannel } from '../../src/sources/github-trigger.ts'
 import { feishuKind } from '../../src/sources/feishu.ts'
-import { githubKind } from '../../src/sources/github.ts'
 import type { Health } from '../../src/sources/host.ts'
 import type { SourceKind } from '../../src/sources/kind.ts'
 import { testDeployment } from './deployment.ts'
@@ -72,16 +70,16 @@ export const promptVersion = (revision: number, config: PromptsView['current']['
 export const droppedReply = (id: string, hoursAgo: number, source: 'feishu' | 'github', reason: DroppedReply['dropped']['reason'],
   { ticket, thread }: { ticket?: DroppedReply['ticket']; thread?: false } = {}): DroppedReply => ({
   id, preview: `Reply ${id}`, kind: 'reply',
-  channel: source === 'feishu' ? feishuChannel('oc_1', 'om_root') : githubChannel(42),
+  channel: source === 'feishu' ? feishuChannel('oc_1', 'om_root') : { source: 'github', thread: 'github:42', address: { number: '42' } },
   dropped: { at: new Date(Date.now() - hoursAgo * 3_600_000).toISOString(), reason }, ...ticket ? { ticket } : {},
   ...thread === false ? {} : { thread: source === 'feishu' ? 'feishu:oc_1:om_root' : 'github:42' },
 })
 const dayAgo = () => new Date(Date.now() - 86_400_000).toISOString()
 export const problemOf = (code: SetupCode, values: Record<string, string> = {}) => new SetupError(code, values).problem
 // The kinds' configurations differ, and the fake reads them only as the records the views carry.
-const KINDS = [feishuKind, githubKind] as unknown as SourceKind[]
-export const MACHINE = { stateDir: '/srv/dsh-superagent', promptMaxChars: 100000, admissionContextMaxPages: 10,
-  admissionContextTimeoutMs: 15000 }
+const KINDS = [feishuKind] as unknown as SourceKind[]
+export const MACHINE: SetupView['machine'] = { stateDir: '/srv/dsh-superagent', repositoryPath: '/srv/src/widgets', promptMaxChars: 100000,
+  admissionContextMaxPages: 10, admissionContextTimeoutMs: 15000, hiFoxSettings: undefined }
 
 type Settings = ReturnType<typeof SettingsSchema.parse>
 export interface PanelServer {
@@ -99,6 +97,8 @@ export interface PanelServer {
   queued: Set<string>
   searching?: (query: string) => Promise<void>
   setup: SetupView
+  hifox: StateView['hifox']
+  listenerStartProblem?: string
   health: Record<string, Health>
   /** When true, all API requests return an empty 404 to simulate the host plugin being stopped. */
   down: boolean
@@ -113,7 +113,7 @@ export let server: PanelServer
 
 function resolved() {
   const accounts = server.setup.accounts
-  return accounts ? testDeployment({ repository: accounts.repository, github: { cli: '/bin/false', login: accounts.agent, noreply: '' },
+  return accounts ? testDeployment({ repositoryPath: accounts.repositoryPath ?? undefined,
     ...accounts.feishu ? { feishu: { cli: '/bin/false', ...accounts.feishu } } : { feishu: undefined } }) : undefined
 }
 /** Default source health: paused during setup; Feishu defaults to `socket closed` unless overridden or paused by setup. */
@@ -149,16 +149,15 @@ function sourceStatuses(): SourceStatusRow[] {
     const problem = problemOf_(kind.kind)
     const state = !enabled ? 'off' : problem || health.some(item => item.state === 'error') ? 'error' : server.setup.problem ? 'setup'
       : health.some(item => item.state === 'starting') ? 'starting' : health.some(item => item.state === 'paused') ? 'paused' : 'ready'
-    const feishu = kind.kind === 'feishu'
     return { id: kind.kind, title: kind.title, installed: true, enabled, state, health, ...problem ? { problem } : {},
-      stats: { received: feishu ? 12 : 0, filtered: feishu ? 2 : 0, lastAt: '2026-09-23T00:00:00Z' },
-      filtered: feishu ? [] : [{ id: 'e9', at: '2026-09-23T00:02:00Z', actor: actor('github', 'someone'), preview: 'looks wrong',
+      stats: { received: 12, filtered: 2, lastAt: '2026-09-23T00:00:00Z' },
+      filtered: [{ id: 'e9', at: '2026-09-23T00:02:00Z', actor: actor('feishu', 'ou_other'), preview: 'looks wrong',
         reason: { code: 'source_disabled' } }],
       dropped: server.dropped.filter(item => item.channel.source === kind.kind && item.dropped.at >= dayAgo()) }
   })
 }
 const stateView = (): StateView => ({
-  setup: server.setup, load: { running: server.setup.problem ? 0 : 2, queued: 0, maxWorkers: server.settings.executor.maxWorkers },
+  setup: server.setup, hifox: server.hifox, load: { running: server.setup.problem ? 0 : 2, queued: 0, maxWorkers: server.settings.executor.maxWorkers },
   masterId: 'master', paused: server.settings.paused,
   // The panel does not read health; the service script does.
   health: {},
@@ -173,8 +172,8 @@ const settingsView = (): ApiResponse<'GET settings'> => ({
     { owner: 'executor', enabled: true, variables: [{ key: 'DSH_SUPERAGENT_DIR', description: { zh: '工单的执行目录',
       en: 'The ticket directory' } },
       { key: 'DSH_SUPERAGENT_NAME', description: { zh: '工单短名', en: 'Short name' } }] },
-    { owner: 'github', enabled: false, variables: [{ key: 'DSH_SUPERAGENT_GITHUB_REPOSITORY', description: { zh: '仓库',
-      en: 'Repository' } }] }] },
+    { owner: 'feishu', enabled: false, variables: [{ key: 'DSH_SUPERAGENT_FEISHU_BOT', description: { zh: '机器人',
+      en: 'Bot' } }] }] },
 })
 const overviewView = (): ApiResponse<'GET overview'> => {
   const { problem, feishuProblem } = server.setup
@@ -205,12 +204,12 @@ export const acceptDecision = (): NonNullable<TicketPageView['decision']> => ({ 
   reason: [{ code: 'explicitRouted' }], at: '2026-09-22T00:00:00Z', strength: 'explicit', ticketId: undefined,
   triggerIds: ['e1'], thread: 'feishu:oc_1:om_root', rules: [], preview: '@bot 修一下', ticketTitle: undefined })
 const ticketDetail = (): TicketPageView => ({
-  ...ticketSummary(), paused: false, decision: acceptDecision(), threads: [threadSummary()],
+  ...ticketSummary(), hifox: null, paused: false, decision: acceptDecision(), threads: [threadSummary()],
   mandate: { strength: 'explicit', policyVersion: 'abcdef1234567890', basis: { via: 'addressed', sender: 'Alice', addressed: 'mention' },
     actor: actor('feishu', MEMBER), scope: '修复登录页回归' },
   basis: { facts: [{ name: 'sender', value: 'Alice' }, { name: 'addressed', value: 'mention' }], legacy: false },
   environment: [{ key: 'DSH_SUPERAGENT_DIR', value: '/w/t1', description: { zh: '执行目录', en: 'Directory' }, owner: 'executor' },
-    { key: 'DSH_SUPERAGENT_GITHUB_NUMBER', value: '', description: { zh: '编号', en: 'Number' }, owner: 'github' }],
+    { key: 'DSH_SUPERAGENT_FEISHU_BOT', value: '', description: { zh: '机器人', en: 'Bot' }, owner: 'feishu' }],
   channels: [{ source: 'feishu', url: 'https://applink.feishu.cn/client/chat/open?openChatId=oc_1', label: { zh: '飞书消息',
     en: 'Feishu message' } },
     { source: 'github', url: 'https://github.com/acme/widgets/issues/42', label: { zh: 'GitHub #42', en: 'GitHub #42' } }],
@@ -233,13 +232,11 @@ function threadPage(key: string, { before, around }: { before?: string; around?:
 }
 function initial(): PanelServer {
   const settings = SettingsSchema.parse({
-    policy: { sources: { feishu: { allowed: [{ id: 'ou_alice', name: 'Alice' }], syncChat: 'oc_team' },
-      github: { allowed: [{ id: 'alice' }] } },
+    policy: { sources: { feishu: { allowed: [{ id: 'ou_alice', name: 'Alice' }], syncChat: 'oc_team' } },
       rules: [{ id: 'copy', name: '文案修改', enabled: true, instruction: '修正明确的文案错误' }] },
     sources: { feishu: { enabled: true, config: { cli: 'lark-bot', chats: [{ chatId: 'oc_team', listen: 'mentions' }],
-      directMessages: true } },
-      github: { enabled: true, config: { repository: 'acme/widgets', cli: 'gh-agent' } } },
-    executor: { blockedCommands: ['gh-personal'] },
+      directMessages: true } } },
+    executor: { blockedCommands: ['lark-personal'] },
   })
   const ended = ticketSummary({ id: 't0', title: '旧工单', state: 'ended', actions: { retry: false, stop: false },
     ended: { at: '2026-09-21T00:00:00Z', by: 'human', reason: 'Human asked to stop', outcome: 'stopped' } }, { stage: 'ended' })
@@ -248,11 +245,12 @@ function initial(): PanelServer {
   const defaults = { revision: 0, previousRevision: null, savedAt: '', source: 'defaults' }
   return {
     health: {}, down: false, pending: 0, opened: [], requests: [], misuse: [], queued: new Set(), dropped: [], failing: [],
+    hifox: { state: 'unconfigured', listener: { state: 'unavailable' } },
     setup: { machine: MACHINE, problem: null, feishuProblem: null,
-      accounts: { repository: 'acme/widgets', agent: 'agent-bot', feishu: { appId: 'cli_bot', brand: 'feishu', botId: 'ou_bot',
+      accounts: { repositoryPath: '/srv/src/widgets', feishu: { appId: 'cli_bot', brand: 'feishu', botId: 'ou_bot',
         name: 'Widgets Bot' } } },
     settings, revisions: { policy: 3, eval: 1, executor: 0 },
-    prompts: { masterId: 'master', sections: TEAM_SECTIONS, skillName: SKILL_NAME.source, builtin: ['feishu', 'github'],
+    prompts: { masterId: 'master', sections: TEAM_SECTIONS, skillName: SKILL_NAME.source, builtin: ['feishu'],
       skillPrefix: SKILL_PREFIX, revision: 0, current: { ...defaults, config: defaultPrompts() },
       defaults: defaultPrompts(), parts: Object.entries(builtInParts()).map(([key, part]) => ({ key, ...part, base: builtInBase(part.text) })),
       defaultChanged: [], revisions: [{ ...defaults, changed: [] }], sessions: [], notificationPending: false, next_offset: null },
@@ -290,8 +288,18 @@ const ticketOf = (id: string) =>
   [...server.tickets.open, ...server.person, ...server.tickets.ended].find(ticket => ticket.id === id) ?? server.ticketDetails[id]
 const SourceSave = z.object({ enabled: z.boolean(), config: z.unknown() })
 
+function changeListener(state: 'stopped' | 'listening') {
+  const listener = { state }
+  server.hifox = { ...server.hifox, listener }
+  return listener
+}
 const ROUTES: { [K in keyof Api]: Route<K> } = {
   'GET state': { answer: stateView },
+  'GET hifox/listener': { answer: () => server.hifox.listener ?? { state: 'unavailable' } },
+  'GET hifox/agents': { answer: () => ({ agents: [] }) },
+  'POST hifox/listener/start': { answer: () => server.listenerStartProblem
+    ? { state: 'error', detail: server.listenerStartProblem } : changeListener('listening') },
+  'POST hifox/listener/stop': { answer: () => changeListener('stopped') },
   'GET overview': { answer: overviewView },
   'GET search': { query: ['q'], answer: async ({ query }) => {
     const q = query.q ?? ''
@@ -389,7 +397,7 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     return { revision: server.prompts.revision, context_delivery: 'injected' }
   } },
   'POST prompts/preview': { body: true, answer: ({ body }) => {
-    const skills = [...server.setup.accounts?.feishu ? ['feishu'] : [], 'github', ...Object.keys(body.skills)].map(name => [name,
+    const skills = [...server.setup.accounts?.feishu ? ['feishu'] : [], ...Object.keys(body.skills)].map(name => [name,
       composeSkill(body, name)])
     // The generated parts from their templates, without variables or rules.
     const environment = environmentSection(body, []), policy = policySection(SettingsSchema.parse({ policy: { rules: [] } }), body)

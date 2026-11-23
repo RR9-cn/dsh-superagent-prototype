@@ -1,4 +1,4 @@
-/** Subprocess wrapper for running gh, lark-cli, and git commands under the deployment's configured accounts. */
+/** Subprocess wrapper for running lark-cli and Git commands under the deployment's configured accounts. */
 import { execFile } from 'node:child_process'
 import { basename } from 'node:path'
 import { promisify } from 'node:util'
@@ -25,7 +25,6 @@ export function commandError(error: unknown, program = 'command'): Error {
     catch { /* Non-JSON CLI diagnostics are retained below. */ }
     const code = parsed?.error?.code
     if (parsed?.error?.message) return new CliError(`${parsed.error.message}${code ? ` (${code})` : ''}`, code, exitCode)
-    // `gh` exits non-zero on HTTP errors (such as `gh: Not Found (HTTP 404)`) and on `gh: HTTP 304`, which ETag polling relies on.
     if (stderr) return new CliError(stderr.slice(0, 2000), Number(/\bHTTP (\d{3})\b/.exec(stderr)?.[1]) || undefined, exitCode)
   }
   return new CliError(`${basename(program)} ${ended(error)}`, undefined, exitCode)
@@ -53,8 +52,7 @@ function membership(error: unknown): unknown {
   return new CliError(hint, error.code, error.exitCode)
 }
 /**
- * Executes gh, lark-cli, and git subprocesses with deployment account credentials, timeouts, and abort signals.
- * Restricts GitHub API calls to the configured repository and translates CLI failures into CliError instances for Sources, MasterAssessor, Outbox, and Settings.
+ * Executes lark-cli and Git subprocesses with deployment account credentials, timeouts, and abort signals.
  */
 export class Commands {
   /**
@@ -63,38 +61,13 @@ export class Commands {
    */
   constructor(private readonly resolved: () => Deployment, private readonly environment: Record<string, string | undefined>, private readonly signal: AbortSignal) {}
   get deployment(): Deployment { return this.resolved() }
-  get repository(): string { return this.deployment.repository }
   withSignal(signal?: AbortSignal): Commands { return signal ? new Commands(this.resolved, this.environment, AbortSignal.any([this.signal, signal])) : this }
-  async run(program: string, args: string[], cwd?: string): Promise<string> {
+  async run(program: string, args: string[], cwd?: string, overrides?: Record<string, string>): Promise<string> {
     try {
       const { stdout } = await exec(program, args, { cwd, signal: this.signal, timeout: TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024,
-        env: { ...process.env, ...this.environment, GH_PROMPT_DISABLED: '1', LARKSUITE_CLI_NO_UPDATE_NOTIFIER: '1', LARKSUITE_CLI_NO_SKILLS_NOTIFIER: '1' } })
+        env: { ...process.env, ...this.environment, ...overrides, LARKSUITE_CLI_NO_UPDATE_NOTIFIER: '1', LARKSUITE_CLI_NO_SKILLS_NOTIFIER: '1' } })
       return stdout
     } catch (error) { throw commandError(error, program) }
-  }
-  /** Runs the agent's GitHub CLI and parses its JSON output; callers should prefer `api`, which is restricted to the configured repository and validates output. */
-  async gh<T>(args: string[]): Promise<T> { return JSON.parse(await this.run(this.deployment.github.cli, args)) as T }
-  /**
-   * Calls the GitHub API on a path within the configured repository, validating JSON output when a schema is provided
-   * or returning raw CLI output (such as raw files or `--include` headers) when omitted.
-   * @throws CliError with GitHub's HTTP status as `code` on failure.
-   */
-  async api<T>(schema: z.ZodType<T>, path: string, ...flags: string[]): Promise<T>
-  async api(path: string, ...flags: string[]): Promise<string>
-  async api<T>(schema: z.ZodType<T> | string, ...rest: string[]): Promise<T | string> {
-    if (typeof schema === 'string') return this.run(this.deployment.github.cli, ['api', this.path(schema), ...rest])
-    const [path = '', ...flags] = rest
-    return schema.parse(await this.gh(['api', this.path(path), ...flags]))
-  }
-  /** Fetches all pages of a GitHub API list within the configured repository, skipping items that fail schema validation. */
-  async pages<T>(item: z.ZodType<T>, path: string, tally?: Tally): Promise<T[]> {
-    const pages = z.array(z.array(z.unknown())).parse(await this.gh(['api', this.path(path), '--paginate', '--slurp']))
-    return validItems(item, pages.flat(), tally)
-  }
-  private path(path: string): string {
-    const outside = /^\/|^[a-z]+:|(^|\/)\.\.?(\/|\?|$)/i.test(path)
-    if (outside) throw new Error('GitHub calls are restricted to the configured repository')
-    return path ? `repos/${this.repository}/${path}` : `repos/${this.repository}`
   }
   /**
    * Runs the Feishu bot's `lark-cli` and returns the JSON `data` payload.
@@ -110,6 +83,8 @@ export class Commands {
     if (!result.ok) throw membership(new CliError(`${result.error?.message ?? 'Feishu command failed'}${code ? ` (${code})` : ''}`, code))
     return result.data
   }
-  /** Runs `git` on PATH using the agent's isolated git environment and credential helper. */
-  async git(args: string[], cwd: string): Promise<string> { return this.run('git', args, cwd) }
+  /** Runs `git` on PATH using the agent's isolated git environment. */
+  async git(args: string[], cwd: string, overrides?: Record<string, string>): Promise<string> {
+    return overrides ? this.run('git', args, cwd, overrides) : this.run('git', args, cwd)
+  }
 }

@@ -3,6 +3,7 @@ import type { ChannelRef, OutboundMessage, ScopeResult, SourceScope, Trigger } f
 import type { Commands } from '../infra/commands.ts'
 import { HealthBoard, type HealthEntry } from '../infra/health.ts'
 import { AdmissionTableSchema, type Settings } from '../policy.ts'
+import { retiredSource } from './kind.ts'
 import type { ChannelLink, ChannelLinks, SourceInstance, SourceKind, TriggerContext, VariableSpec } from './kind.ts'
 
 
@@ -18,6 +19,7 @@ export class SourceRegistry implements SourceScope {
 
   /** Registers a SourceKind, claims its health entries on HealthBoard (rejecting `sync:` prefixes owned by Settings), and returns an unregister disposer. */
   register<C extends Record<string, unknown>>(kind: SourceKind<C>): () => void {
+    if (retiredSource(kind.kind)) throw new Error(`Source kind has been removed: ${kind.kind}`)
     if (this.kinds.has(kind.kind)) throw new Error(`Source kind already registered: ${kind.kind}`)
     const refused = (name: string) => new Error(`Source kind ${kind.kind} declares the health entry ${name}, which another part reports`)
     const synced = kind.health.find(name => name.startsWith('sync:'))
@@ -58,7 +60,7 @@ export class SourceRegistry implements SourceScope {
   }
   /** Validates each Source's part of a submitted Policy against its kind; policy parts for uninstalled Source kinds are kept as stored. */
   validatePolicy(parts: Record<string, Record<string, unknown>>): Record<string, Record<string, unknown> & { allowed: { id: string; name?: string }[] }> {
-    return Object.fromEntries(Object.entries(parts).map(([id, part]) => {
+    return Object.fromEntries(Object.entries(parts).filter(([id]) => !retiredSource(id)).map(([id, part]) => {
       const policy = this.kinds.get(id)?.policy
       // `admission` is validated by the Policy's own schema (shared across all kinds), while the kind validates the rest of its part.
       const { admission, ...rest } = part
@@ -122,13 +124,15 @@ export class SourceRegistry implements SourceScope {
     }
   }
   scope(input: { source: string; meta: Record<string, unknown> }, settings = this.settings()): ScopeResult {
+    if (retiredSource(input.source)) return { listened: false, reason: 'source_not_installed' }
     const kind = this.kinds.get(input.source)
     const stored = settings.sources[input.source]
     // Without its kind plugin the stored scope cannot be evaluated, so a configured Source whose plugin is missing listens to nothing.
     if (!kind) return stored ? { listened: false, reason: 'source_not_installed' } : { listened: true, observed: false }
     const instance = this.resolve(kind, stored)
     if (!instance.enabled) return { listened: false, reason: 'source_disabled' }
-    return kind.scope ? kind.scope({ meta: input.meta }, instance.config) : { listened: true, observed: false }
+    const scope = kind.scope?.({ meta: input.meta }, instance.config) ?? { listened: true, observed: false }
+    return scope.listened && kind.acceptsAnyAddressedSender ? { ...scope, acceptsAnyAddressedSender: true } : scope
   }
   /** Falls back to schema defaults and disables the instance when stored configuration fails validation. */
   private resolve(kind: SourceKind, stored: { enabled: boolean; config: Record<string, unknown> } | undefined): SourceInstance {

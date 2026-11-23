@@ -1,8 +1,8 @@
 /** Probes repository and account CLIs, configures the worker execution environment and command shims, and tracks setup readiness. */
 import type { Context } from '@deepseek-ai/cordis'
 import { UserError } from '../core/index.ts'
-import { SETUP_FIELDS, resolveDeployment, resolveFeishuBot, workerProbe, type Deployment, type Machine } from '../deployment.ts'
-import { agentVariables, applyEnvironment, verifyEnvironment, withoutDirectory, workerBin, writeEnvironment } from '../infra/environment.ts'
+import { SETUP_FIELDS, resolveFeishuBot, workerProbe, type Deployment, type Machine } from '../deployment.ts'
+import { agentVariables, applyEnvironment, withoutDirectory, workerBin, writeEnvironment } from '../infra/environment.ts'
 import type { Settings, SettingsBlock } from '../policy.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
 
@@ -18,7 +18,7 @@ const setupFields = (settings: Settings) =>
 export const setupChanged = (before: Settings, after: Settings): boolean => setupFields(before) !== setupFields(after)
 
 /**
- * Resolves the target repository, GitHub account, and optional Feishu bot by probing CLIs, then writes and applies the isolated git and shim environment used by worker processes.
+ * Resolves the optional Feishu bot and prepares the isolated Git and command environment used by worker processes.
  * `Runtime` runs it at startup to gate orchestration readiness, while `Settings` uses it to validate account changes, update blocked command shims, and schedule restarts.
  */
 export class Setup {
@@ -41,6 +41,10 @@ export class Setup {
     return this.resolved
   }
   configured(): boolean { return this.resolved !== undefined }
+  changed(before: Settings, after: Settings): boolean {
+    const enabled = (settings: Settings) => settings.sources.feishu?.enabled !== false
+    return setupChanged(before, after) || enabled(before) !== enabled(after)
+  }
   /** Resolve deployment accounts and apply the worker environment, recording `SetupError` failures in `problem`/`feishuProblem` and rethrowing unexpected errors. */
   async run(settings: Settings): Promise<boolean> {
     try { this.resolved = await this.resolve(settings); return true }
@@ -59,10 +63,8 @@ export class Setup {
   restart(): void { setTimeout(this.host.restart, 0) }
   /** Verify account CLIs for a modified source block before saving, ignoring setup errors belonging to other blocks. */
   async checkAccounts(block: SettingsBlock, settings: Settings): Promise<void> {
-    const { machine } = this.host
-    const check = block === 'source:feishu' ? resolveFeishuBot(machine, settings.sources.feishu?.config, this.probe())
-      : resolveDeployment(machine, settings.sources.github?.config, this.probe())
-    await check.catch((error: unknown) => { if (!(error instanceof SetupError) || error.place === block.slice(7)) throw error })
+    if (block !== 'source:feishu' || settings.sources.feishu?.enabled === false) return
+    await resolveFeishuBot(this.host.machine, settings.sources.feishu?.config, this.probe(), this.path)
   }
   async blockCommands(blocked: readonly string[]): Promise<void> {
     if (this.resolved) await writeEnvironment(this.resolved, blocked)
@@ -74,26 +76,21 @@ export class Setup {
     return workerProbe(context.subprocess, machine.stateDir, machine.stateDir, lifetime)
   }
   private async resolve(settings: Settings): Promise<Deployment> {
-    const { context, machine, lifetime } = this.host
+    const { context, machine } = this.host
     const probe = this.probe()
-    const deployment = await resolveDeployment(machine, settings.sources.github?.config, probe)
-    const feishu = await resolveFeishuBot(machine, settings.sources.feishu?.config, probe).catch((error: unknown) => {
+    const feishu = settings.sources.feishu?.enabled === false ? undefined : await resolveFeishuBot(machine, settings.sources.feishu?.config, probe, this.path).catch((error: unknown) => {
       if (!(error instanceof SetupError)) throw error
       this.feishuProblem = error.problem
       context.logger.warn('dsh-superagent leaves Feishu out: %s', error.message)
       return undefined
     })
-    const resolved = { ...deployment, ...(feishu ? { feishu } : {}) }
+    const resolved = { ...machine, ...(feishu ? { feishu } : {}) }
     const machineProblem = (error: unknown): never => {
       if (error instanceof SetupError) throw error
       throw new SetupError('environmentFailed', { output: error instanceof Error ? error.message : String(error) })
     }
     await writeEnvironment(resolved, settings.executor.blockedCommands).catch(machineProblem)
     this.restoreEnvironment = applyEnvironment(this.variables, machine.stateDir, this.path)
-    await verifyEnvironment(resolved, context.subprocess, lifetime).catch((error: unknown) => {
-      this.restore()
-      machineProblem(error)
-    })
     return resolved
   }
 }

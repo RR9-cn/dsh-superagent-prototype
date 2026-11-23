@@ -13,7 +13,7 @@ import type {} from '@deepseek-ai/dsh-subprocess'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { lockSync } from 'proper-lockfile'
-import { Engine, key, reasonText, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
+import { Engine, key, reasonText, type EngineForSettings, type Executor, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
 import { allowedSender, settingsPolicy } from '../policy.ts'
 import { SourceRegistry } from '../sources/registry.ts'
 import { Commands } from '../infra/commands.ts'
@@ -21,19 +21,24 @@ import type { Deployment, Machine } from '../deployment.ts'
 import { environmentOf, ticketEnvironment, type Variable } from './execution-environment.ts'
 import type { SetupProblem } from '../setup.ts'
 import { DshExecutor, sourceTrigger, triggerMessage, workerSessionId } from '../executor/dsh.ts'
+import { HiFoxExecutor } from '../executor/hifox.ts'
+import { hiFoxScope, type HiFoxAgent, type HiFoxPilot, type HiFoxScope } from '../executor/hifox-port.ts'
+import { DINGTALK, dingTalkKind, pilotTrigger, receiveDingTalk, type DingTalkIntake, type DingTalkIntakeResult } from '../sources/dingtalk.ts'
+import { openDingTalkSocket } from '../sources/dingtalk-socket.ts'
+import type { DingTalkListener, DingTalkListenerStatus } from '../sources/dingtalk-listener.ts'
 import { ticketCard } from './cards.ts'
 import { MasterAssessor } from './assessment.ts'
 import { KV } from '../kv.ts'
 import { Store } from './store.ts'
 import { evalsHealth } from './views/overview.ts'
 import { TextCache } from './cache.ts'
-import { Effects } from './effects.ts'
+import { Effects, Later } from './effects.ts'
 import { Prompts } from './prompts.ts'
 import { registerHttp, type HttpHost } from './http.ts'
 import type { LinkTarget } from './views/records.ts'
 import { candidateCard, repliedTo, sourceLink, type LinkHost } from './links.ts'
 import { eventNotice, followupNotice } from './notices.ts'
-import { pullEndNotices } from '../sources/github-pull.ts'
+import { retireSources } from './retired-sources.ts'
 import { HealthBoard } from '../infra/health.ts'
 import { Outbox } from './outbox.ts'
 import { Passes } from './passes.ts'
@@ -66,6 +71,7 @@ export class Runtime extends Service implements SourceHost {
   readonly sessions: Sessions
   readonly settings: Settings
   readonly executor: DshExecutor
+  readonly hiFox?: HiFoxExecutor
   readonly assessor: MasterAssessor
   readonly outbox: Outbox
   readonly engine: Engine
@@ -82,9 +88,17 @@ export class Runtime extends Service implements SourceHost {
   private stopping?: Promise<void>
   private readonly sourceDeps: SourceContextDeps
   private readonly toolHost: MainToolsHost & ExecutorToolsHost
+  private readonly dingTalk?: DingTalkIntake
+  private readonly listenDingTalk?: boolean
+  private readonly hiFoxScope?: HiFoxScope
+  private readonly hiFoxAgents?: HiFoxPilot['gateway']['agents']
+  private readonly readDingTalkContext?: HiFoxPilot['readDingTalkContext']
+  private ingressListening = false
+  private dingTalkSocket?: ReturnType<typeof openDingTalkSocket>
+  private dingTalkListener?: DingTalkListener
   /** Non-zero while a main-Session tool is executing an Engine command, suppressing self-triggered domain event notices. */
   private quiet = 0
-  constructor(ctx: Context, readonly machine: Machine, restart: () => void) {
+  constructor(ctx: Context, readonly machine: Machine, restart: () => void, hiFoxPilot?: HiFoxPilot, private readonly hiFoxDetail?: string) {
     super(ctx, 'orchestrator')
     const runtime = this
     // Lock the state directory before opening the database so another process cannot migrate or write concurrently.
@@ -134,8 +148,70 @@ export class Runtime extends Service implements SourceHost {
       const outbox = this.outbox = new Outbox({ store, effects, sources, commands, paused: () => this.paused() })
       const { assessor, executor } = this
       const policy = () => settingsPolicy(store.settings(), sources)
-      const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor,
-        outbox, prepareTicket: (ticket, outcome) => executor.prepare(ticket, outcome), emit: event => {
+      if (hiFoxPilot) {
+        const { gateway, reconcileMs } = hiFoxPilot
+        this.listenDingTalk = hiFoxPilot.dingTalkSocket === true
+        if (reconcileMs !== undefined && (!Number.isFinite(reconcileMs) || reconcileMs <= 0)) {
+          throw new Error('HiFox reconciliation window must be a positive number of milliseconds')
+        }
+        const pilot = { scope: hiFoxScope.parse(hiFoxPilot.scope), gateway,
+          ...(reconcileMs === undefined ? {} : { reconcileMs }),
+          sendDingTalk: hiFoxPilot.sendDingTalk.bind(hiFoxPilot) }
+        this.hiFoxScope = pilot.scope
+        this.hiFoxAgents = gateway.agents.bind(gateway)
+        this.readDingTalkContext = hiFoxPilot.readDingTalkContext
+        this.disposers.push(sources.register(dingTalkKind(pilot.scope, async message => {
+          if (hiFoxPilot.requireTerminalOrigin) {
+            const ticket = message.ticketId && store.tickets.get(message.ticketId)
+            const trigger = ticket && store.triggers.get(ticket.origin.triggerId)
+            const meta = trigger && pilotTrigger(trigger, pilot.scope)
+            const address = message.channel.address
+            if (!ticket || ticket.executionTarget !== 'hifox' || !meta || !message.hiFoxTerminal
+              || meta.messageId !== address.messageId || meta.conversationId !== address.conversationId) return 'gone'
+          }
+          return pilot.sendDingTalk(message)
+        })))
+        this.hiFox = new HiFoxExecutor({ store, effects, get engine() { return runtime.engine }, pilot, policy,
+          paused: () => this.paused(), lifetime: this.lifetime })
+        this.dingTalk = {
+          scope: pilot.scope, getTrigger: id => store.triggers.get(id),
+          getReference: id => store.triggers.disposition(id)?.filtered ? undefined : store.triggers.get(id),
+          receive: trigger => this.passes.receive(trigger),
+        }
+        this.dingTalkListener = hiFoxPilot.createDingTalkListener?.(message => this.receiveDingTalk(message))
+      }
+      const routeHiFox = (ticketId: string): boolean => {
+        if (store.tickets.get(ticketId)?.executionTarget !== 'hifox') return false
+        if (!this.hiFox) throw new Later('The HiFox executor is unavailable')
+        this.hiFox.queue(ticketId)
+        return true
+      }
+      effects.handle('launch', async payload => {
+        if (routeHiFox(payload.ticketId)) return
+        await executor.launchQueued(payload)
+      }, { limit: () => this.paused() ? 0 : Math.max(this.hiFox ? 1 : 0, executor.launchCapacity()), retry: [5000, 300_000] })
+      effects.handle('delivery', async payload => {
+        if (routeHiFox(payload.ticketId)) return
+        await executor.deliverQueued(payload.ticketId)
+      }, { limit: () => this.paused() ? 0 : 4, quiet: true })
+      const routedExecutor: Executor = {
+        start: (ticket, assignment) => executor.start(ticket, assignment),
+        deliver: (ticket, assignment) => executor.deliver(ticket, assignment),
+        stop: (ticket, assignment, reason) => {
+          if (ticket.executionTarget === 'hifox') this.hiFox?.queue(ticket.id)
+          else executor.stop(ticket, assignment, reason)
+        },
+      }
+      const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor: routedExecutor,
+        outbox, prepareTicket: (ticket, outcome) => {
+          if (sourceTrigger({ store }, ticket)?.source !== DINGTALK) return executor.prepare(ticket, outcome)
+          if (!outcome.hiFoxAgent || outcome.hiFoxAgent.space !== this.hiFoxScope?.space) {
+            throw new Error('Choose an eligible HiFox Agent before accepting the DingTalk request.')
+          }
+          return { ...ticket, executionTarget: 'hifox', hiFoxAgent: outcome.hiFoxAgent,
+            ...(outcome.hiFoxQuote ? { hiFoxQuote: outcome.hiFoxQuote } : {}),
+            ...(outcome.note ? { hiFoxRoutingNote: outcome.note } : {}) }
+        }, emit: event => {
           // Notify the main Session only about domain events it did not initiate itself.
           const notice = this.quiet ? undefined : eventNotice(event, id => store.tickets.get(id))
           if (notice) sessions.notify(...notice)
@@ -144,12 +220,6 @@ export class Runtime extends Service implements SourceHost {
           const followed = !this.quiet && (event.type === 'trigger.received' || event.type === 'ticket.resumed' || event.type === 'trigger.followup')
           const followup = followed ? followupNotice(store, sources, event.data.triggerId) : undefined
           if (followup) sessions.relay(followup.id, followup.text)
-          // Notify the ticket's conversations whenever it ends via a pull request.
-          const ended = event.type === 'ticket.ended' ? store.tickets.get(event.data.ticketId) : undefined
-          if (ended && setup.configured()) {
-            const request = store.triggers.get(ended.origin.triggerId)?.text ?? ''
-            for (const message of pullEndNotices(ended, request, setup.deployment.repository)) outbox.send(message)
-          }
         } })
       // Update the `evals` health entry on every pass if an evaluation failed as unavailable within the last hour.
       const evals = board.claim('evals', { state: 'ready', detail: 'No unavailable Eval in the last hour' })
@@ -158,9 +228,21 @@ export class Runtime extends Service implements SourceHost {
         health: this.runtimeHealth, lifetime: this.lifetime, configured: () => setup.configured(), closing: () => this.closing() })
       this.sourceDeps = { store, engine, outbox, commands, sources, get ready() { return runtime.ready },
         get deployment() { return setup.deployment }, configured: () => setup.configured(),
-        get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, receive: trigger => passes.receive(trigger) }
+        get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, receive: trigger => this.receive(trigger) }
       this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources,
-        get github() { return runtime.context({ kind: 'github', health: ['github'] }) },
+        hiFoxAgents: (triggerId, signal) => {
+          this.dingTalkOrigin(triggerId)
+          return this.liveHiFoxRoster(signal)
+        },
+        dingTalkContext: async (triggerId, signal) => {
+          const origin = this.dingTalkOrigin(triggerId)
+          const room = origin.meta
+          const nearby = await this.readDingTalkContext?.({ conversationId: room.conversationId, messageId: room.messageId,
+            ...(room.quotedMessageId ? { quotedMessageId: room.quotedMessageId } : {}), at: origin.trigger.at },
+          AbortSignal.any([this.lifetime, signal]))
+          return { original: { conversationId: room.conversationId, messageId: room.messageId,
+            text: origin.trigger.text, at: origin.trigger.at }, ...(nearby ?? {}) }
+        },
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
         quietly: run => { this.quiet++; try { return run() } finally { this.quiet-- } } }
       this.ready = this.initialize()
@@ -182,7 +264,7 @@ export class Runtime extends Service implements SourceHost {
   get feishuProblem(): SetupProblem | undefined { return this.setup.feishuProblem }
   links(): LinkTarget {
     const resolved = this.setup.configured() ? this.setup.deployment : undefined
-    const links = resolved ? { repository: resolved.repository, ...(resolved.feishu ? { feishu: resolved.feishu } : {}) } : {}
+    const links = resolved?.feishu ? { feishu: resolved.feishu } : {}
     return channel => this.sources.link(channel, links)
   }
   ticketEnvironment(ticket: Ticket): Variable[] {
@@ -191,7 +273,26 @@ export class Runtime extends Service implements SourceHost {
     return ticketEnvironment({ deployment, sources, settings: this.store.settings(), ticket, ...trigger ? { trigger } : {} })
   }
   checkSetup(): void { this.setup.check() }
-  receive(trigger: Trigger): ReceiveResult { return this.passes.receive(trigger) }
+  receive(trigger: Trigger): ReceiveResult {
+    if (trigger.source === DINGTALK) throw new Error('Use receiveDingTalk for authenticated pilot events')
+    return this.passes.receive(trigger)
+  }
+  receiveDingTalk(message: unknown): DingTalkIntakeResult {
+    if (!this.dingTalk) throw new Error('The DingTalk pilot is unavailable')
+    return receiveDingTalk(this.dingTalk, message)
+  }
+  private dingTalkOrigin(id: string) {
+    const trigger = this.store.triggers.get(id)
+    const meta = trigger && this.dingTalk && pilotTrigger(trigger, this.dingTalk.scope)
+    if (!trigger || !meta || this.store.triggers.disposition(id)?.filtered || !this.engine.candidate(id)) {
+      throw new Error('DingTalk routing requires an active, admitted candidate in the configured conversation.')
+    }
+    return { trigger, meta }
+  }
+  private async liveHiFoxRoster(signal = this.lifetime): Promise<{ space: string; agents: HiFoxAgent[] }> {
+    if (!this.hiFoxAgents || !this.hiFoxScope) throw new Error('HiFox is not configured.')
+    return { space: this.hiFoxScope.space, agents: await this.hiFoxAgents(AbortSignal.any([this.lifetime, signal])) }
+  }
   idle(): Promise<void> { return this.passes.idle() }
   pump(): Promise<void> { return this.passes.pump() }
   sendReplies(): Promise<void> { return this.outbox.sent() }
@@ -211,16 +312,49 @@ export class Runtime extends Service implements SourceHost {
     for (const id of this.settings.syncable()) await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })
     // If stop() was called while awaiting setup, session creation, or policy sync, do not start background loops.
     if (this.closing()) return
+    if (this.listenDingTalk) {
+      this.dingTalkSocket = openDingTalkSocket(this.machine.stateDir, this.lifetime, event => this.receiveDingTalk(event))
+      this.ingressListening = !!await this.dingTalkSocket
+      if (this.closing()) return
+    }
+    this.quiet++
+    try { retireSources(this.store, this.engine, this.effects) } finally { this.quiet-- }
     this.executor.resume()
+    this.hiFox?.resume()
     this.passes.start()
     this.effects.start()
     this.runtimeHealth.set({ state: 'ready', detail: 'Orchestrator is ready', at: now() })
+  }
+  private hiFoxStatus() {
+    const scope = this.hiFoxScope
+    if (!scope) return { state: 'unconfigured' as const, listener: this.listenerStatus() }
+    return {
+      state: this.paused() || this.closing() || !this.sources.instance(DINGTALK)?.enabled ? 'paused' as const : 'configured' as const,
+      ingress: this.ingressListening && !this.closing() ? 'socket' as const : this.listenDingTalk ? 'offline' as const : 'direct' as const,
+      space: scope.space, listener: this.listenerStatus(),
+    }
+  }
+  private listenerStatus(): DingTalkListenerStatus {
+    return this.dingTalkListener?.status() ?? { state: 'unavailable', ...(this.hiFoxDetail ? { detail: this.hiFoxDetail } : {}) }
+  }
+  private startListener(): DingTalkListenerStatus {
+    if (!this.dingTalkListener) return this.listenerStatus()
+    const status = this.dingTalkListener.status()
+    if (status.state === 'listening' || status.state === 'starting' || status.state === 'stopping') return status
+    if (this.closing() || this.paused() || !this.sources.instance(DINGTALK)?.enabled) {
+      return { state: 'error', detail: 'Resume the DingTalk source and DSH processing before starting the listener.' }
+    }
+    return this.dingTalkListener.start()
   }
   private httpHost(): HttpHost {
     const runtime = this
     const { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks, setup, passes } = this
     return { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks,
       get deployment() { return setup.deployment },
+      hiFoxStatus: () => runtime.hiFoxStatus(),
+      hiFoxAgentRoster: async () => ({ agents: runtime.hiFoxScope ? (await runtime.liveHiFoxRoster()).agents : [] }),
+      listenerStatus: () => runtime.listenerStatus(), listenerStart: () => runtime.startListener(),
+      listenerStop: () => runtime.dingTalkListener?.stop() ?? runtime.listenerStatus(),
       get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },
       configured: () => setup.configured(), links: () => runtime.links(), ticketEnvironment: ticket => runtime.ticketEnvironment(ticket),
       checkSetup: () => { setup.check() }, requestPass: () => { passes.request() }, models: () => this.ctx.sessionController.modelCatalog() }
@@ -230,6 +364,10 @@ export class Runtime extends Service implements SourceHost {
   private async shutdown(): Promise<void> {
     this.closingFlag = true; const passes = this.passes.stop(); this.stopped.abort()
     try {
+      await this.dingTalkListener?.dispose()
+      // Abort closes active clients. Wait for binding and teardown before releasing the state-directory lock.
+      const closeSocket = await this.dingTalkSocket?.catch(() => undefined)
+      await closeSocket?.()
       this.assessor.stop()
       const ids = [this.masterId, ...this.store.tickets.list().map(ticket => workerSessionId(ticket.id))]
       const agents = ids.map(id => this.ctx.agents.get(id as SessionId)).filter((agent): agent is Agent => agent !== undefined)
