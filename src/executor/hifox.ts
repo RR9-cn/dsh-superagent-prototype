@@ -1,4 +1,4 @@
-import { Later, type Effects } from '../app/effects.ts'
+import { Later, PollAgain, type Effects } from '../app/effects.ts'
 import type { Store } from '../app/store.ts'
 import {
   key, latestAssignment, liveTicket, type Assignment, type Engine, type Policy, type Ticket, type TicketInput,
@@ -6,8 +6,8 @@ import {
 import { family, record } from '../kv.ts'
 import { DINGTALK, dingTalkMeta, pilotTrigger } from '../sources/dingtalk.ts'
 import {
-  commentReceipt, parseWorkerReport, runObservation, runReceipt, taskReceipt,
-  type HiFoxPilot, type HiFoxScope, type HiFoxWorkOrder, type RunObservation, type RunReceipt,
+  commentReceipt, parseWorkerReport, runObservation, runReceipt, taskReceipt, terminalTask,
+  type HiFoxPilot, type HiFoxScope, type HiFoxTaskStatus, type HiFoxTaskTarget, type HiFoxWorkOrder, type RunObservation, type RunReceipt,
 } from './hifox-port.ts'
 
 type TriggerInput = Extract<TicketInput, { kind: 'trigger' }>
@@ -35,6 +35,8 @@ interface Binding {
   scope: string
   taskUuid?: string
   taskUrl?: string
+  taskStatus?: HiFoxTaskStatus
+  taskTarget?: HiFoxTaskTarget
   pending?: Pending
   comments: Record<string, string>
   attempts: Record<string, Attempt>
@@ -55,6 +57,7 @@ export function hiFoxTicket(store: Pick<Store, 'get'>, ticket: Ticket) {
   return {
     taskUuid: binding?.taskUuid ?? null,
     taskUrl: taskUrl || null,
+    taskStatus: binding?.taskStatus ?? null,
     runId: assignment && binding?.lastResult?.assignmentId === assignment.id
       ? binding.lastResult.runId ?? attempt?.receipt.runId ?? null : attempt?.receipt.runId ?? null,
     conversationId: attempt?.receipt.conversationId ?? null,
@@ -72,7 +75,7 @@ const sameRun = (a: RunReceipt, b: RunReceipt): boolean =>
 interface Host {
   store: Store
   effects: Effects
-  engine: Pick<Engine, 'assignmentStarted' | 'inputsDelivered' | 'inputsRead' | 'report' | 'reply'>
+  engine: Pick<Engine, 'assignmentStarted' | 'inputsDelivered' | 'inputsRead' | 'report' | 'reply' | 'stopTicket'>
   pilot: HiFoxPilot & { scope: HiFoxScope }
   policy(): Policy
   paused(): boolean
@@ -292,8 +295,9 @@ export class HiFoxExecutor {
     }
     return { code: report.outcome === 'completed' ? 'ready' : 'agent_blocked', summary: report.summary }
   }
-  private async finish(ticket: Ticket, assignment: Assignment, binding: Binding, inputs: Inputs, result: Result): Promise<void> {
+  private async finish(ticket: Ticket, assignment: Assignment, binding: Binding, inputs: Inputs, result: Result): Promise<boolean> {
     const { engine, store } = this.host
+    if (await this.syncTask(ticket.id, binding)) return false
     const { verdict } = result
     const marker = key('hifox-result', ticket.id, inputs.revision, verdict.code, verdict.summary)
     if (!this.authorized(ticket.id, assignment.id, inputs.revision)) throw new Later('The current HiFox work changed during verification')
@@ -313,6 +317,11 @@ export class HiFoxExecutor {
       this.save(ticket.id, binding)
       if (verdict.code === 'ready') {
         engine.report(ticket.id, { state: 'ready', summary: verdict.summary })
+        if (store.tickets.get(ticket.id)?.ended?.outcome === 'completed') {
+          binding.taskTarget = 'completed'
+          this.save(ticket.id, binding)
+          this.queue(ticket.id)
+        }
         engine.reply({ purpose: 'result', ticketId: ticket.id, hiFoxTerminal: true,
           text: `${verdict.summary} HiFox 卡 ${binding.taskUuid}，输入版本 ${inputs.revision}。` })
       } else {
@@ -321,6 +330,7 @@ export class HiFoxExecutor {
           ...(verdict.code === 'agent_blocked' ? { hiFoxTerminal: true } : {}) })
       }
     })
+    return true
   }
   private async followTask(ticket: Ticket, assignment: Assignment, binding: Binding, inputs: Inputs): Promise<void> {
     const { gateway } = this.host.pilot
@@ -334,13 +344,13 @@ export class HiFoxExecutor {
       && run.status === 'completed') {
       const verdict = this.verdict(run, attempt, inputs)
       if (verdict.code === 'ready' || verdict.code === 'agent_blocked') {
-        await this.finish(ticket, assignment, binding, inputs, {
+        const reported = await this.finish(ticket, assignment, binding, inputs, {
           assignmentId: assignment.id, revision: inputs.revision, runId: run.runId, verdict,
         })
-        if (verdict.code === 'ready') return
+        if (!reported || verdict.code === 'ready') return
       }
     }
-    throw new Later('Waiting for a newer result on the HiFox Task', taskFollowupInterval)
+    throw new PollAgain('Waiting for a newer result on the HiFox Task', taskFollowupInterval)
   }
   private async reconcileRetiredBinding(ticketId: string, binding: Binding): Promise<void> {
     const { store, pilot } = this.host
@@ -378,6 +388,24 @@ export class HiFoxExecutor {
     this.block(ticketId, binding, '原选定的 HiFox Agent 当前不在可用名单中，需要人工核对。')
     return false
   }
+  /** Persist the verified card status. A terminal card relinquishes local follow-up, even if its Run reported blocked. */
+  private async syncTask(ticketId: string, binding: Binding, target?: HiFoxTaskTarget): Promise<boolean> {
+    if (!binding.taskUuid) return false
+    const { gateway } = this.host.pilot
+    const status = terminalTask(binding.taskStatus) ? binding.taskStatus!
+      : target ? await gateway.setTaskStatus(binding.taskUuid, target, this.signal())
+        : await gateway.taskStatus(binding.taskUuid, this.signal())
+    const closed = terminalTask(status)
+    this.host.store.atomic(() => {
+      if (binding.taskStatus?.name !== status.name || binding.taskStatus?.category !== status.category || binding.taskTarget) {
+        binding.taskStatus = status
+        delete binding.taskTarget
+        this.save(ticketId, binding)
+      }
+      if (closed && this.current(ticketId)) this.host.engine.stopTicket(ticketId, `HiFox 卡片状态为「${status.name}」，已结束跟进。`)
+    })
+    return closed
+  }
   private async step(ticketId: string): Promise<void> {
     const { store, pilot, engine } = this.host
     const ticketRecord = store.tickets.get(ticketId)
@@ -390,6 +418,10 @@ export class HiFoxExecutor {
     const binding: Binding = store.get(bindings(ticketId)) ?? { scope: scopeKey ?? 'unassigned', comments: {}, attempts: {} }
     if (!scopeKey || !selected || binding.scope !== scopeKey) { await this.reconcileRetiredBinding(ticketId, binding); return }
     if (binding.pending && !await this.reconcile(ticketId, binding, binding.pending)) return
+    if (binding.taskUuid && (ticketRecord?.ended?.outcome === 'stopped' || binding.taskTarget || this.current(ticketId))) {
+      const target = binding.taskTarget ?? (ticketRecord?.ended?.outcome === 'stopped' ? 'canceled' : undefined)
+      await this.syncTask(ticketId, binding, target)
+    }
     const active = this.current(ticketId)
     const inputs = active && this.inputs(active.ticket)
     const owner = store.get(activeRun)
@@ -400,7 +432,7 @@ export class HiFoxExecutor {
       this.save(ticketId, binding)
       const run = await this.observe(ticketId, binding, attempt)
       if (!run) return
-      if (!stopped(run)) throw new Later('A prior HiFox Run may require manual cancellation')
+      if (!stopped(run)) throw new PollAgain('A prior HiFox Run may require manual cancellation')
       delete binding.issue
       this.save(ticketId, binding)
     }
@@ -416,6 +448,7 @@ export class HiFoxExecutor {
       const marker = key('hifox-task', ticketId)
       await this.write(ticket, assignment, binding, inputs, { kind: 'task', marker, since: this.now(),
         title: ticket.title, description: JSON.stringify({ ticketId, origin: inputs.initialClues[0]?.messageId }) })
+      if (await this.syncTask(ticketId, binding)) return
     }
     await this.deliver(ticket, assignment, binding, inputs)
     let attempt = binding.attempts[assignment.id]
@@ -441,6 +474,8 @@ export class HiFoxExecutor {
     }
     if (!this.authorized(ticketId, assignment.id, inputs.revision)) throw new Later('The current HiFox work changed after dispatch')
     if (assignment.state === 'pending') {
+      if (binding.taskStatus?.category !== 'started' && await this.syncTask(ticketId, binding, 'started')) return
+      if (!this.authorized(ticketId, assignment.id, inputs.revision)) throw new Later('The current HiFox work changed during status update')
       engine.assignmentStarted(ticketId, assignment.id)
       await this.deliver(ticket, assignment, binding, inputs)
     }
@@ -450,13 +485,13 @@ export class HiFoxExecutor {
     const confirmedReads = new Set(run.readInputIds)
     const read = inputs.triggerInputs.filter(({ input }) => confirmedReads.has(input.id)).map(({ input }) => input.id)
     if (read.length) engine.inputsRead(ticketId, read)
-    if (!stopped(run)) throw new Later('The HiFox Run is still active')
+    if (!stopped(run)) throw new PollAgain('The HiFox Run is still active')
     const result = binding.verified?.assignmentId === assignment.id && binding.verified.revision === inputs.revision
       ? binding.verified
       : { assignmentId: assignment.id, revision: inputs.revision, runId: run.runId, verdict: this.verdict(run, attempt, inputs) }
-    await this.finish(ticket, assignment, binding, inputs, result)
-    if (pilot.gateway.taskRun && result.verdict.code !== 'ready') {
-      throw new Later('Waiting for a newer result on the HiFox Task', taskFollowupInterval)
+    const reported = await this.finish(ticket, assignment, binding, inputs, result)
+    if (reported && pilot.gateway.taskRun && result.verdict.code !== 'ready') {
+      throw new PollAgain('Waiting for a newer result on the HiFox Task', taskFollowupInterval)
     }
   }
 }

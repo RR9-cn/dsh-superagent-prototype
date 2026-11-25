@@ -5,6 +5,10 @@
 export class Later extends Error {
   constructor(message: string, readonly delayMs?: number) { super(message) }
 }
+
+/** A successful check that should run again. Keep the row and clear its consecutive failures. */
+export class PollAgain extends Later {}
+
 /** Consecutive failures before an effect kind reports an error, matching the Sources poll failure threshold. */
 export const FAILURES_BEFORE_ERROR = 3
 import type { HealthBoard, HealthEntry } from '../infra/health.ts'
@@ -140,7 +144,10 @@ export class Effects {
     // Leave running rows untouched on shutdown so they retry on the next start.
     else if (this.stopped) return
     else if (failure.error instanceof Later) {
-      this.store.db.prepare(`UPDATE effect SET due = ? WHERE ${own}`).run(this.now() + (failure.error.delayMs ?? handler.retry[0]), ...ownRow)
+      const due = this.now() + (failure.error.delayMs ?? handler.retry[0])
+      if (failure.error instanceof PollAgain) {
+        this.store.db.prepare(`UPDATE effect SET due = ?, attempts = 0, error = '' WHERE ${own}`).run(due, ...ownRow)
+      } else this.store.db.prepare(`UPDATE effect SET due = ? WHERE ${own}`).run(due, ...ownRow)
     } else {
       const delay = Math.min(handler.retry[1], handler.retry[0] * 2 ** Math.min(row.attempts, 16))
       this.store.db.prepare(`UPDATE effect SET attempts = attempts + 1, error = ?, due = ? WHERE ${own}`)

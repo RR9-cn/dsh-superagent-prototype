@@ -163,6 +163,28 @@ describe('verified transport contracts', () => {
     ])
   })
 
+  it('writes and reads back the card status, preserving a terminal status set in HiFox', async () => {
+    let status = { name: '待开始', category: 'unstarted' }
+    const command = vi.fn<PilotCommand>(async (_binary, args) => {
+      const [group, action] = args
+      if (group === 'automation' && action === 'list') return result([])
+      if (group === 'task' && action === 'view') {
+        return result({ id: work.taskUuid, spaceId: scope.space, description: 'DSH-SUPERAGENT-OPERATION:marker', status })
+      }
+      if (group === 'task' && action === 'edit') {
+        expect(args).toEqual(['task', 'edit', work.taskUuid, '--status', '进行中', '--output', 'json'])
+        status = { name: '进行中', category: 'started' }
+        return result({})
+      }
+      throw new Error('unexpected command')
+    })
+    const gateway = hiFoxCliGateway(command, '/hifox', scope)
+    await expect(gateway.setTaskStatus(work.taskUuid, 'started', signal)).resolves.toEqual({ name: '进行中', category: 'started' })
+    status = { name: '已取消', category: 'cancelled' }
+    await expect(gateway.setTaskStatus(work.taskUuid, 'completed', signal)).resolves.toEqual(status)
+    expect(command.mock.calls.filter(([, [group, action]]) => group === 'task' && action === 'edit')).toHaveLength(1)
+  })
+
   it('passes the original request to HiFox and pins the Agent-owned computer in the Run receipt', async () => {
     let observedComputer = 'other-computer'
     let runTaskId = work.taskUuid

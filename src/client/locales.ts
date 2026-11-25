@@ -555,6 +555,7 @@ const TEXT = {
   hifoxSpace: ['空间 ID', 'Space ID'],
   hifoxNoTask: ['尚无已确认的 HiFox 工单。', 'No confirmed HiFox task yet.'],
   hifoxTask: ['HiFox 工单', 'HiFox task'],
+  hifoxTaskStatus: ['HiFox 卡片状态', 'HiFox task status'],
   hifoxAssignedAgent: ['执行 Agent', 'Assigned Agent'],
   hifoxRun: ['执行 ID', 'Run ID'],
   hifoxOpenSettings: ['配置 HiFox', 'Configure HiFox'],

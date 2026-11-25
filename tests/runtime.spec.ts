@@ -35,7 +35,8 @@ import { preview, readable } from '../src/app/views/text.ts'
 import { decisionList, search, threadDetail, threadList } from '../src/app/views/threads.ts'
 import { executorLoad, ticketDetail, ticketList } from '../src/app/views/tickets.ts'
 import type { DingTalkMessage } from '../src/sources/dingtalk.ts'
-import type { CommentReceipt, HiFoxGateway, HiFoxPilot, HiFoxWorkOrder, RunObservation, TaskReceipt } from '../src/executor/hifox-port.ts'
+import { terminalTask, type CommentReceipt, type HiFoxGateway, type HiFoxPilot, type HiFoxTaskStatus, type HiFoxWorkOrder,
+  type RunObservation, type TaskReceipt } from '../src/executor/hifox-port.ts'
 
 let runtime: Runtime
 const viewsOf = (value: Runtime) => ({ store: value.store, sources: value.sources, links: value.links() })
@@ -1531,6 +1532,7 @@ function dingTalkMessage(messageId: string, overrides: Partial<DingTalkMessage> 
 }
 function fakeHiFox() {
   const tasks: TaskReceipt[] = []
+  const statuses = new Map<string, HiFoxTaskStatus>()
   const comments: (CommentReceipt & { text: string })[] = []
   const orders: HiFoxWorkOrder[] = []
   const runs: RunObservation[] = []
@@ -1539,9 +1541,18 @@ function fakeHiFox() {
     createTask: vi.fn<HiFoxGateway['createTask']>(async input => {
       const task = { ...input, taskUuid: `task-${tasks.length + 1}` }
       tasks.push(task)
+      statuses.set(task.taskUuid, { name: '待开始', category: 'unstarted' })
       return task
     }),
     findTasks: vi.fn<HiFoxGateway['findTasks']>(async (space, marker) => tasks.filter(item => item.space === space && item.marker === marker)),
+    taskStatus: vi.fn<HiFoxGateway['taskStatus']>(async taskUuid => statuses.get(taskUuid)!),
+    setTaskStatus: vi.fn<HiFoxGateway['setTaskStatus']>(async (taskUuid, category) => {
+      const current = statuses.get(taskUuid)!
+      if (terminalTask(current)) return current
+      const status = { category, name: { started: '进行中', completed: '已完成', canceled: '已取消' }[category] }
+      statuses.set(taskUuid, status)
+      return status
+    }),
     comment: vi.fn<HiFoxGateway['comment']>(async input => {
       const comment = { ...input, commentId: `comment-${comments.length + 1}` }
       comments.push(comment)
@@ -1574,7 +1585,7 @@ function fakeHiFox() {
         outcome: 'completed', summary: '已定位具体缺项，见工单记录 evidence-01', ...overrides },
     })
   }
-  return { pilot, gateway, tasks, comments, runs, orders, finish, sendDingTalk }
+  return { pilot, gateway, tasks, statuses, comments, runs, orders, finish, sendDingTalk }
 }
 async function startPilot(pilot: HiFoxPilot): Promise<void> {
   await restart({}, {}, pilot)
@@ -1891,6 +1902,31 @@ db.close()
     }))
   })
 
+  it('clears a HiFox Task polling alert on a healthy check and keeps watching the blocked ticket', async () => {
+    const remote = fakeHiFox()
+    await startPilot(remote.pilot)
+    const ticketId = await acceptPilot()
+    remote.finish(0, { outcome: 'blocked', summary: '等待补充。' })
+    await advancePilot()
+
+    remote.gateway.taskRun.mockRejectedValue(new DOMException('The operation was aborted', 'AbortError'))
+    for (let attempt = 0; attempt < 3; attempt++) await advancePilot()
+    expect(runtime.health.hifox).toMatchObject({ state: 'error', detail: expect.stringContaining('AbortError') })
+
+    remote.gateway.taskRun.mockResolvedValue(undefined)
+    await advancePilot()
+    expect(runtime.health.hifox).toMatchObject({ state: 'ready', detail: expect.stringContaining('1 waiting') })
+    expect(runtime.effects.pending('hifox', ticketId)).toBe(true)
+    expect(lastPilotReport(ticketId)?.state).toBe('blocked')
+
+    remote.gateway.taskRun.mockRejectedValue(new DOMException('The operation was aborted', 'AbortError'))
+    await advancePilot()
+    expect(runtime.health.hifox).toMatchObject({ state: 'ready' })
+    await advancePilot()
+    await advancePilot()
+    expect(runtime.health.hifox).toMatchObject({ state: 'error' })
+  })
+
   it('follows the same HiFox Task after a blocked Run and accepts a verified continuation after restart', async () => {
     const remote = fakeHiFox()
     await startPilot(remote.pilot)
@@ -1898,6 +1934,7 @@ db.close()
     remote.finish(0, { outcome: 'blocked', summary: '需要在原会话补充信息。' })
     await advancePilot()
     expect(lastPilotReport(ticketId)?.state).toBe('blocked')
+    expect(remote.statuses.get('task-1')?.name).toBe('进行中')
     expect(runtime.effects.pending('hifox', ticketId)).toBe(true)
 
     const original = remote.runs[0]!
@@ -1913,9 +1950,53 @@ db.close()
     await advancePilot()
     expect(runtime.store.tickets.get(ticketId)?.ended?.outcome).toBe('completed')
     expect(lastPilotReport(ticketId)).toMatchObject({ state: 'ready', summary: '已使用补充信息完成。' })
+    expect(remote.statuses.get('task-1')?.name).toBe('已完成')
     expect(remote.gateway.summon).toHaveBeenCalledTimes(1)
     expect(remote.comments.filter(row => row.text.includes('已使用补充信息完成。'))).toHaveLength(1)
     expect(runtime.effects.pending('hifox', ticketId)).toBe(false)
+  })
+
+  it.each([['已完成', 'completed'], ['已取消', 'cancelled'], ['存在重复', 'duplicate']])(
+    'stops Task follow-up on %s and preserves the last verified Run report across restart', async (name, category) => {
+      const remote = fakeHiFox()
+      await startPilot(remote.pilot)
+      const ticketId = await acceptPilot()
+      remote.finish(0, { outcome: 'blocked', summary: '等待补充信息。' })
+      await advancePilot()
+      const status = { name, category }
+      remote.statuses.set('task-1', status)
+      remote.gateway.taskRun.mockClear()
+      await advancePilot()
+      expect(runtime.hiFox?.status(ticketId)?.taskStatus).toEqual(status)
+      expect(runtime.store.tickets.get(ticketId)?.ended?.reason).toContain(name)
+      expect(lastPilotReport(ticketId)?.state).toBe('blocked')
+      expect(runtime.effects.pending('hifox', ticketId)).toBe(false)
+      await restart({}, {}, remote.pilot)
+      await runtime.ready
+      await advancePilot()
+      expect(remote.gateway.taskRun).not.toHaveBeenCalled()
+      expect(remote.gateway.setTaskStatus.mock.calls.map(([, target]) => target)).toEqual(['started'])
+    },
+  )
+
+  it('retries confirmed completion after a lost status write receipt without repeating the result', async () => {
+    const remote = fakeHiFox()
+    await startPilot(remote.pilot)
+    const ticketId = await acceptPilot()
+    remote.gateway.setTaskStatus.mockImplementationOnce(async () => {
+      remote.statuses.set('task-1', { name: '已完成', category: 'completed' })
+      throw new Error('lost status receipt')
+    })
+    remote.finish(0)
+    await advancePilot()
+    expect(runtime.store.tickets.get(ticketId)?.ended?.outcome).toBe('completed')
+    expect(runtime.effects.pending('hifox', ticketId)).toBe(true)
+    await restart({}, {}, remote.pilot)
+    await runtime.ready
+    await advancePilot()
+    expect(runtime.hiFox?.status(ticketId)?.taskStatus?.name).toBe('已完成')
+    expect(runtime.effects.pending('hifox', ticketId)).toBe(false)
+    expect(remote.comments).toHaveLength(1)
   })
 
   it('preserves an earlier pilot ticket and observes its Run without retrying the old work order', async () => {
@@ -1987,10 +2068,12 @@ db.close()
     release.resolve()
     expect(await accepted).toBe(id)
     expect(runtime.hiFox?.status(id)?.issue).toContain('确认停止 Run')
+    expect(remote.statuses.get('task-1')?.name).toBe('已取消')
     remote.finish(0)
     await advancePilot()
     expect(runtime.store.tickets.get(id)?.ended?.by).toBe('human')
     expect(remote.gateway.summon).toHaveBeenCalledTimes(1)
     expect(remote.comments).toHaveLength(0)
+    expect(remote.gateway.taskRun).not.toHaveBeenCalled()
   })
 })

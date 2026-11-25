@@ -68,10 +68,17 @@ export const parseWorkerReport = (value: unknown) => workerReport.safeParse(valu
  * fail instead of claiming uniqueness. Task creation and plain comments must have auto-assignment and comment hooks off.
  * The adapter embeds the stable operation marker in the task description or comment so it can find a lost receipt.
  */
+export interface HiFoxTaskStatus { name: string; category: string }
+export type HiFoxTaskTarget = 'started' | 'completed' | 'canceled'
+export const terminalTask = (status: HiFoxTaskStatus | undefined): boolean =>
+  !!status && ['completed', 'canceled', 'cancelled', 'duplicate'].includes(status.category)
+
 export interface HiFoxGateway {
   agents(signal: AbortSignal): Promise<HiFoxAgent[]>
   createTask(input: { space: string; marker: string; title: string; description: string }, signal: AbortSignal): Promise<TaskReceipt>
   findTasks(space: string, marker: string, signal: AbortSignal): Promise<TaskReceipt[]>
+  taskStatus(taskUuid: string, signal: AbortSignal): Promise<HiFoxTaskStatus>
+  setTaskStatus(taskUuid: string, target: HiFoxTaskTarget, signal: AbortSignal): Promise<HiFoxTaskStatus>
   comment(input: { taskUuid: string; marker: string; text: string }, signal: AbortSignal): Promise<CommentReceipt>
   findComments(taskUuid: string, marker: string, signal: AbortSignal): Promise<CommentReceipt[]>
   summon(input: { agent: string; work: HiFoxWorkOrder }, signal: AbortSignal): Promise<RunReceipt>

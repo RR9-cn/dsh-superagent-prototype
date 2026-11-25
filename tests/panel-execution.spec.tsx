@@ -7,16 +7,17 @@ import { usePanel, mount, remount, all, find, tab, click, type, text, field, at 
 import { MEMBER, server, ticketSummary, threadSummary } from './fixtures/panel-server.ts'
 
 usePanel()
-it('shows the selected HiFox Agent and confirmed task link and Run on its ticket', async () => {
+it('shows the selected HiFox Agent, confirmed task link, task status and Run on its ticket', async () => {
   const taskUrl = 'https://app.hifox.com/fshows/task/FSH-1'
   server.ticketDetails.t1 = { ...server.ticketDetails.t1!,
     hifox: { taskUuid: 'task-1', taskUrl, conversationId: 'conversation-1', runId: 'run-1',
-      agentId: 'agent-1', agentName: 'Operations Agent' } }
+      taskStatus: { name: '已取消', category: 'canceled' }, agentId: 'agent-1', agentName: 'Operations Agent' } }
   at({ page: 'execution', id: 't1' })
   await mount()
   expect(all('a').find(link => link.textContent === 'task-1')?.getAttribute('href')).toBe(taskUrl)
   expect(text()).toContain('run-1')
   expect(text()).toContain('Operations Agent')
+  expect(text()).toContain('已取消')
 })
 
 it('lists Tickets under Execution by who they wait on, with the Executor state and its pause as an action', async () => {

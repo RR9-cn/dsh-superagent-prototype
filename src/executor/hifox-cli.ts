@@ -2,7 +2,7 @@
 import { z } from 'zod'
 import { readPilotJson, type PilotCommand } from '../infra/pilot-cli.ts'
 import { type HiFoxAgent, type HiFoxGateway, type HiFoxScope, type HiFoxWorkOrder, type RunReceipt, type RunObservation, taskReceipt, runReceipt, commentReceipt,
-  runObservation, parseWorkerReport } from './hifox-port.ts'
+  runObservation, parseWorkerReport, terminalTask } from './hifox-port.ts'
 
 const markerHeader = 'DSH-SUPERAGENT-OPERATION:'
 const workHeader = 'DSH-SUPERAGENT-WORK-ORDER'
@@ -25,9 +25,11 @@ const isEligible = (agent: z.infer<typeof pilotAgent>, space: string) =>
   && (!agent.provisioningState || agent.provisioningState === 'ready') && belongsToSpace(agent, space)
 
 const session = z.object({ id, agentId: id, lastRunId: id.nullish().or(z.literal('')) })
+const taskState = z.object({ name: z.string().trim().min(1), category: z.string().trim().min(1) })
+const taskStateNames = { started: '进行中', completed: '已完成', canceled: '已取消' }
 const task = z.object({ id, spaceId: id, description: z.string().nullable().optional(), url: z.string().optional(),
   agentChatSessions: z.array(session).optional(), assigneeId: id.nullable().optional(),
-  assignees: z.array(z.unknown()).optional(), delegate: z.unknown().optional() })
+  assignees: z.array(z.unknown()).optional(), delegate: z.unknown().optional(), status: taskState.optional() })
 const detail = z.object({ id, status: z.string(), agentId: id, chatSessionId: id.nullable().optional(),
   // Summoned Runs may hold their task relationship on the conversation and return an empty taskId here.
   taskId: z.union([id, z.literal('')]).nullish(), computerId: id.nullable().optional(),
@@ -96,15 +98,22 @@ export function hiFoxCliGateway(cmd: PilotCommand, cli: string, scope: HiFoxScop
     }
     throw new Error('HiFox result exceeded the reconciliation page limit')
   }
-  async function readTask(taskUuid: string, signal: AbortSignal) {
+  async function readPilotTask(taskUuid: string, signal: AbortSignal) {
     const card = task.parse(await fox(['task', 'view', taskUuid], signal))
     if (card.id !== taskUuid || card.spaceId !== scope.space || !firstLine(card.description)?.startsWith(markerHeader)) {
       throw new Error('HiFox task is outside the configured pilot')
     }
+    return card
+  }
+  async function readTask(taskUuid: string, signal: AbortSignal) {
+    const card = await readPilotTask(taskUuid, signal)
     if (card.assigneeId || card.assignees?.length || card.delegate) {
       throw new Error('HiFox pilot task has an automatic assignee or delegate')
     }
     return card
+  }
+  async function taskStatus(taskUuid: string, signal: AbortSignal) {
+    return taskState.parse((await readPilotTask(taskUuid, signal)).status)
   }
   async function verify(signal: AbortSignal): Promise<void> {
     const auth = z.object({ authenticated: z.literal(true), authMode: z.literal('user') })
@@ -188,7 +197,16 @@ export function hiFoxCliGateway(cmd: PilotCommand, cli: string, scope: HiFoxScop
   const receiptForTask = (card: z.infer<typeof task>, marker: string) => taskReceipt.parse({ space: scope.space, marker, taskUuid: card.id,
     taskUrl: taskReceipt.shape.taskUrl.safeParse(card.url).data })
   return {
-    verify, agents,
+    verify, agents, taskStatus,
+    async setTaskStatus(taskUuid, target, signal) {
+      await verifyWriteScope(signal)
+      const current = await taskStatus(taskUuid, signal)
+      if (terminalTask(current) || current.category === target) return current
+      await fox(['task', 'edit', taskUuid, '--status', taskStateNames[target]], signal)
+      const actual = await taskStatus(taskUuid, signal)
+      if (actual.category !== target && !terminalTask(actual)) throw new Error('HiFox Task status update could not be verified')
+      return actual
+    },
     async createTask(input, signal) {
       if (input.space !== scope.space) throw new Error('HiFox Space is outside the configured pilot')
       await verify(signal)
