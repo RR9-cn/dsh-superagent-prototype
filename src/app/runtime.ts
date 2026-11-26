@@ -334,7 +334,7 @@ export class Runtime extends Service implements SourceHost {
     if (dreaming?.automatic) {
       this.dreaming.enableMaintenance(openVikingMemory(dreaming.cli, this.lifetime), () => {
         const signal = AbortSignal.any([this.lifetime, AbortSignal.timeout(180_000)])
-        return collectOpenVikingAudit(dreaming.cli, openVikingMemory(dreaming.cli, signal).snapshot, signal)
+        return collectOpenVikingAudit(dreaming.cli, openVikingMemory(dreaming.cli, signal).snapshot, signal, undefined, this.store)
       }, () => this.paused() || this.closing())
     }
     this.passes.start()

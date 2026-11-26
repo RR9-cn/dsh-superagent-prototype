@@ -10,14 +10,20 @@ const message = z.object({ role: z.string(), parts: z.array(z.unknown()), peer_i
 const archive = z.object({ archive_id: z.string(), status: z.string().optional(), messages: z.array(z.unknown()) })
 const textPart = z.object({ type: z.literal('text'), text: z.string() })
 const toolPart = z.object({ type: z.literal('tool'), tool_name: z.string(), tool_output: z.string() })
-const evidenceLimit = 20
 const excerptLimit = 1200
+const archivePageSize = 64
 
 const sessions = z.array(z.object({ session_id: z.string().regex(/^[a-zA-Z0-9_.@-]+$/).refine(id => id !== '.' && id !== '..') }))
 const directory = z.object({ ok: z.literal(true), result: z.array(z.object({ uri: z.string(), isDir: z.boolean(),
-  modTime: z.string().nullish() })), has_more: z.boolean().optional() })
+  modTime: z.string().nullish(), size: z.unknown().optional() })), has_more: z.boolean().optional() })
 const cliFailure = z.object({ error: z.object({ code: z.string() }) })
 export interface OpenVikingArchiveRow { uri: string; codex: boolean; modifiedAt: string | null }
+export type CachedArchiveEvidence = { revision: string; pack: DreamingEvidencePack }
+export interface ArchiveEvidenceCache {
+  get(uri: string): CachedArchiveEvidence | undefined
+  set(uri: string, entry: CachedArchiveEvidence): void
+  delete(uri: string): void
+}
 
 /** An OpenViking read may be retried after the server's quota window resets. */
 export class OpenVikingThrottled extends Error {
@@ -61,13 +67,14 @@ function readCommand(cli: string, args: string[], signal: AbortSignal, run: Pilo
   }, signal)
 }
 
-export async function listOpenVikingDirectory(cli: string, root: string, signal: AbortSignal, run: PilotCommand, optional = false) {
+export async function listOpenVikingDirectory(cli: string, root: string, signal: AbortSignal, run: PilotCommand,
+  optional = false, includeHidden = false) {
   const rows: z.infer<typeof directory>['result'] = []
   const pageSize = 100
   let offset = 0
   for (;;) {
     const reply = await readListing(cli, ['ls', root, '--limit', String(pageSize), '--offset', String(offset),
-      '--include-abstract=false', '--include-overview=false'], signal, run)
+      '--include-abstract=false', '--include-overview=false', ...(includeHidden ? ['--all'] : [])], signal, run)
     const page = directory.safeParse(reply)
     if (!page.success) {
       if (optional && offset === 0 && cliFailure.safeParse(reply).data?.error.code === 'NOT_FOUND') return rows
@@ -118,7 +125,30 @@ export async function readOpenVikingEvidence(cli: string, uri: string, signal: A
     return parsed.data.result
   }
   const completed = () => read(['read', `${uri}/.done`], 'OpenViking archive completion marker')
-  let archivedMessages: unknown[]
+  const needsSmallerRead = (error: unknown) => error instanceof Error &&
+    (error.message === 'Pilot CLI output exceeded the response limit' || error.name === 'AbortError')
+  async function* readWindows() {
+    let limit = archivePageSize
+    for (let offset = 0; ;) {
+      let text: string
+      try {
+        text = z.string().parse(await read(['read', `${uri}/messages.jsonl`, '--offset', String(offset), '--limit', String(limit)],
+          'OpenViking archive window'))
+      } catch (error) {
+        signal.throwIfAborted()
+        if (limit === 1 || !needsSmallerRead(error)) throw error
+        limit = Math.floor(limit / 2)
+        continue
+      }
+      if (!text) return
+      const lines = text.replace(/\n$/u, '').split('\n')
+      if (lines.length > limit) throw new Error('OpenViking exceeded the requested archive window')
+      for (const line of lines) yield line.trim() ? JSON.parse(line) as unknown : undefined
+      if (lines.length < limit) return
+      offset += lines.length
+    }
+  }
+  let archivedMessages: Iterable<unknown> | AsyncIterable<unknown>
   try {
     const archived = archive.parse(await read(['session', 'get-session-archive', sessionId, archiveId], 'OpenViking archive'))
     if (archived.archive_id !== archiveId || (archived.status !== undefined && archived.status !== 'completed')) {
@@ -128,30 +158,22 @@ export async function readOpenVikingEvidence(cli: string, uri: string, signal: A
     archivedMessages = archived.messages
   } catch (error) {
     signal.throwIfAborted()
-    if (!(error instanceof Error) || (error.message !== 'Pilot CLI output exceeded the response limit' && error.name !== 'AbortError')) throw error
+    if (!needsSmallerRead(error)) throw error
     await completed()
-    // The archive endpoint returns the entire transcript. Use a bounded JSONL window on large archives.
-    const window = async (limit: number) => {
-      const rows = z.string().parse(await read(['read', `${uri}/messages.jsonl`, '--offset', '0', '--limit', String(limit)], 'OpenViking archive window'))
-      return rows.split('\n').filter(line => line.trim()).map(line => JSON.parse(line) as unknown)
-    }
-    try { archivedMessages = await window(8) }
-    catch (windowError) {
-      signal.throwIfAborted()
-      if (!(windowError instanceof Error) || windowError.message !== 'Pilot CLI output exceeded the response limit') throw windowError
-      archivedMessages = await window(1)
-    }
+    archivedMessages = readWindows()
   }
-  const messages = z.array(message).parse(archivedMessages)
-  const peers = new Set(messages.flatMap(item => item.peer_id ? [item.peer_id] : []))
-  const project = peers.size === 1 ? [...peers][0]! : sessionId
+  const peers = new Set<string>()
   const evidence: DreamingEvidencePack['evidence'] = []
-  for (let row = messages.length - 1; row >= 0 && evidence.length < evidenceLimit; row--) {
-    const { role, parts } = messages[row]!
+  let row = 0
+  for await (const archivedMessage of archivedMessages) {
+    row++
+    if (archivedMessage === undefined) continue
+    const { role, parts, peer_id } = message.parse(archivedMessage)
+    if (peer_id) peers.add(peer_id)
     if (role !== 'user' && role !== 'assistant' && role !== 'tool') continue
-    for (let part = parts.length - 1; part >= 0 && evidence.length < evidenceLimit; part--) {
-      const tool = toolPart.safeParse(parts[part])
-      const text = textPart.safeParse(parts[part])
+    for (const [index, part] of parts.entries()) {
+      const tool = toolPart.safeParse(part)
+      const text = textPart.safeParse(part)
       const kind = tool.success ? 'tool-result' : role === 'user' ? 'user-report' : 'agent-report'
       const raw = tool.success ? `${tool.data.tool_name}\n${tool.data.tool_output}` : text.success ? text.data.text : ''
       if (!raw.trim()) continue
@@ -159,23 +181,56 @@ export async function readOpenVikingEvidence(cli: string, uri: string, signal: A
         .replace(/\b(?:Bearer\s+|(?:api[_ -]?key|access[_ -]?token|password|secret)["']?\s*[:=]\s*)(?:"[^"\n]*"|'[^'\n]*'|[^\s,;]+)/gi, '[redacted]')
         .replace(/\b(?:gh[pousr]_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{12,})\b/g, '[redacted]')
         .trim().slice(0, excerptLimit)
-      evidence.push({ id: `m${row + 1}p${part + 1}`, source: `${uri}/messages.jsonl#L${row + 1}`, kind, text: excerpt })
+      evidence.push({ id: `m${row}p${index + 1}`, source: `${uri}/messages.jsonl#L${row}`, kind, text: excerpt })
     }
   }
   if (!evidence.length) throw new Error('The selected OpenViking archive contains no readable evidence')
-  evidence.reverse()
+  const project = peers.size === 1 ? [...peers][0]! : sessionId
   return { id: key(project, uri, JSON.stringify(evidence)), project, archiveUri: uri, evidence }
 }
 
-/** Stages each archive separately so one unavailable archive cannot hide the rest. */
-export async function collectOpenVikingEvidence(cli: string, signal: AbortSignal, run: PilotCommand = pilotCommand) {
+async function archiveRevision(cli: string, uri: string, signal: AbortSignal, run: PilotCommand) {
+  const list = () => listOpenVikingDirectory(cli, uri, signal, run, true, true)
+  const rows = await list().catch(async () => {
+    signal.throwIfAborted()
+    await wait(500, undefined, { signal })
+    return list()
+  })
+  const version = ['messages.jsonl', '.done'].map(name => {
+    const row = rows.find(row => !row.isDir &&
+      row.uri.replace(/^viking:\/\/user\/[^/]+\//u, 'viking://~/') === `${uri}/${name}`)
+    return row?.modTime && Number.isFinite(Date.parse(row.modTime)) &&
+      typeof row.size === 'number' && Number.isSafeInteger(row.size) && row.size >= 0 ? [row.uri, row.modTime, row.size] : undefined
+  })
+  return version.every(file => file !== undefined) ? key('archive-evidence-v1', JSON.stringify(version)) : undefined
+}
+
+/** Rediscovers every archive and reuses evidence only from a fully read, unchanged completed archive. */
+export async function collectOpenVikingEvidence(cli: string, signal: AbortSignal, run: PilotCommand = pilotCommand,
+  cache?: ArchiveEvidenceCache) {
   const catalog = await listOpenVikingArchives(cli, signal, run)
   const packs: DreamingEvidencePack[] = []
   const skipped: string[] = []
+  const collect = async ({ uri }: OpenVikingArchiveRow) => {
+    if (!cache) return readOpenVikingEvidence(cli, uri, signal, run)
+    const revision = await archiveRevision(cli, uri, signal, run).catch(() => undefined)
+    signal.throwIfAborted()
+    const cached = revision ? cache.get(uri) : undefined
+    if (cached && cached.revision === revision) return cached.pack
+    cache.delete(uri)
+    const pack = await readOpenVikingEvidence(cli, uri, signal, run)
+    if (revision) {
+      const confirmed = await archiveRevision(cli, uri, signal, run)
+      if (confirmed !== revision) throw new Error('OpenViking archive changed while reading its evidence')
+      signal.throwIfAborted()
+      cache.set(uri, { revision, pack })
+    }
+    return pack
+  }
   for (let index = 0; index < catalog.archives.length; index += 4) {
     signal.throwIfAborted()
     const group = catalog.archives.slice(index, index + 4)
-    const results = await Promise.allSettled(group.map(row => readOpenVikingEvidence(cli, row.uri, signal, run)))
+    const results = await Promise.allSettled(group.map(collect))
     results.forEach((result, position) => {
       if (result.status === 'fulfilled') packs.push(result.value)
       else skipped.push(group[position]!.uri)

@@ -1,12 +1,76 @@
 import { expect, it, vi } from 'vitest'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { collectOpenVikingAudit } from '../src/app/dreaming/audit.ts'
 import { collectOpenVikingEvidence, listOpenVikingArchives, readOpenVikingEvidence } from '../src/app/dreaming/openviking.ts'
+import { Store } from '../src/app/store.ts'
 import type { PilotCommand } from '../src/infra/pilot-cli.ts'
 
 const uri = 'viking://~/sessions/cx-00000000-1111-2222-3333-444444444444/history/archive_001'
 const signal = new AbortController().signal
 const cli = '/usr/bin/ov'
 const response = (result: unknown) => ({ code: 0, stdout: JSON.stringify({ ok: true, result }), stderr: '' })
+
+it('reuses persistent evidence, rereads changed and missed archives, and selects evidence for all memories again', async () => {
+  const folder = mkdtempSync(join(tmpdir(), 'dreaming-archive-cache-'))
+  const config = join(folder, 'ovcli.conf')
+  const database = join(folder, 'db.sqlite')
+  writeFileSync(config, JSON.stringify({ url: 'https://openviking.example', api_key: 'test' }))
+  vi.stubEnv('OPENVIKING_CLI_CONFIG_FILE', config)
+  const root = 'viking://~/memories'
+  const history = 'viking://~/sessions/session/history'
+  const archiveIds = ['archive_001', 'archive_002', 'archive_003', 'archive_004']
+  let nextDay = false
+  let metadataRetry = false
+  let store = new Store(database)
+  const snapshot = vi.fn(async (uri: string) => ({
+    uri, digest: 'unmodified', content: uri.endsWith('runner.md') ? 'compiler wrapper' : 'compiler verification',
+  }))
+  const run = vi.fn<PilotCommand>(async (_cli, args) => {
+    if (args[0] === 'ls') {
+      const dir = args[1]!
+      if (dir === root) return response(['runner.md', 'verification.md'].map(name => ({ uri: `${root}/${name}`, isDir: false })))
+      if (dir === history) return response(archiveIds.map(id => ({ uri: `${history}/${id}`, isDir: true })))
+      if (!dir.startsWith(`${history}/`)) return response([])
+      if (nextDay && dir.endsWith('archive_001') && !metadataRetry) {
+        metadataRetry = true
+        return { code: 1, stdout: '', stderr: 'Metadata temporarily unavailable' }
+      }
+      const files = dir.endsWith('archive_003') && !nextDay ? ['messages.jsonl'] : ['messages.jsonl', '.done']
+      return response(files.map(name => ({ uri: `${dir}/${name}`, isDir: false, size: 123,
+        modTime: dir.endsWith('archive_002') && nextDay ? '2026-11-26T12:00:00Z' : '2026-11-25T12:00:00Z' })))
+    }
+    if (args[1] === 'list') return response([{ session_id: 'session' }])
+    const id = args[3]
+    if (id === 'archive_004' && !nextDay) return { code: 1, stdout: '', stderr: 'Unavailable' }
+    return response({ archive_id: id, status: id === 'archive_003' && !nextDay ? 'pending' : 'completed', messages: [
+      { role: 'user', parts: [{ type: 'text', text: `compiler ${id} ${id === 'archive_002' && nextDay ? 'revised' : 'initial'}` }] },
+    ] })
+  })
+  try {
+    const first = await collectOpenVikingAudit(cli, snapshot, signal, run, store)
+    expect(first.archiveSkipped).toEqual(archiveIds.slice(2).map(id => `${history}/${id}`))
+    store.close()
+    store = new Store(database)
+    nextDay = true
+    run.mockClear()
+    const second = await collectOpenVikingAudit(cli, snapshot, signal, run, store)
+    expect(second.archiveSkipped).toEqual([])
+    expect(metadataRetry).toBe(true)
+    expect(run.mock.calls.filter(([, args]) => args[1] === 'get-session-archive').map(([, args]) => args[3])).toEqual(archiveIds.slice(1))
+    expect(snapshot).toHaveBeenCalledTimes(4)
+    for (const pack of second.packs) {
+      expect(pack.evidence.map(item => item.text)).toEqual(expect.arrayContaining([
+        'compiler archive_001 initial', 'compiler archive_002 revised', 'compiler archive_003 initial', 'compiler archive_004 initial',
+      ]))
+    }
+  } finally {
+    store.close()
+    vi.unstubAllEnvs()
+    rmSync(folder, { recursive: true, force: true })
+  }
+})
 
 it('uses current memories as audit targets and reads archive evidence across all sessions', async () => {
   const user = 'viking://~/memories/experiences/runner.md'
@@ -74,12 +138,55 @@ it('refuses arbitrary OpenViking paths and incomplete archives', async () => {
 })
 
 it('uses a bounded transcript window when the full archive exceeds the CLI limit', async () => {
-  const run = vi.fn<PilotCommand>().mockRejectedValueOnce(new Error('Pilot CLI output exceeded the response limit'))
-    .mockResolvedValueOnce(response('{}'))
-    .mockResolvedValueOnce(response(JSON.stringify({ role: 'user', parts: [{ type: 'text', text: 'Check the workspace.' }] })))
+  const rows = Array.from({ length: 70 }, (_, index) => index === 31 ? '' : JSON.stringify({
+    role: index === 39 ? 'tool' : 'user', peer_id: index === 39 ? 'repo-peer' : null,
+    parts: index === 39 ? [{ type: 'tool', tool_name: 'runner', tool_output: 'Middle tool result' }]
+      : [{ type: 'text', text: `Message ${index + 1}` }],
+  }))
+  const run = vi.fn<PilotCommand>(async (_cli, args) => {
+    if (args[0] === 'session' || args[5] === '64') throw new Error('Pilot CLI output exceeded the response limit')
+    if (args[1]?.endsWith('/.done')) return response('{}')
+    const offset = Number(args[3]), limit = Number(args[5])
+    return response(rows.slice(offset, offset + limit).join('\n') + '\n')
+  })
   const pack = await readOpenVikingEvidence(cli, uri, signal, run)
-  expect(pack.evidence).toMatchObject([{ source: `${uri}/messages.jsonl#L1`, text: 'Check the workspace.' }])
-  expect(run.mock.calls[2]![1]).toEqual(['read', `${uri}/messages.jsonl`, '--offset', '0', '--limit', '8', '-o', 'json'])
+  expect(pack.project).toBe('repo-peer')
+  expect(pack.evidence).toHaveLength(69)
+  expect(pack.evidence.find(item => item.kind === 'tool-result')).toMatchObject({
+    id: 'm40p1', source: `${uri}/messages.jsonl#L40`, text: 'runner\nMiddle tool result',
+  })
+  expect(pack.evidence.at(-1)?.id).toBe('m70p1')
+  expect(run.mock.calls.slice(2).map(([, args]) => [args[3], args[5]])).toEqual([
+    ['0', '64'], ['0', '32'], ['32', '32'], ['64', '32'],
+  ])
+})
+
+it('selects mid-archive proof and nearby cited context without exceeding the per-memory budget', async () => {
+  const root = 'viking://~/memories'
+  const memory = `${root}/runner.md`
+  const rows = Array.from({ length: 50 }, (_, index) => ({
+    role: index === 24 ? 'tool' : 'assistant',
+    parts: index === 24 ? [{ type: 'tool', tool_name: 'compiler', tool_output: 'Works without the wrapper.' }]
+      : [{ type: 'text', text: index === 25 ? 'Approved in the same environment.' : 'Always use the compiler wrapper.' }],
+  }))
+  const run: PilotCommand = async (_cli, args) => {
+    if (args[0] === 'ls') {
+      const directory = args[1]
+      return response(directory === root ? [{ uri: memory, isDir: false }] :
+        directory?.endsWith('/history') ? [{ uri, isDir: true }] : [])
+    }
+    if (args[1] === 'list') return response([{ session_id: uri.split('/')[4] }])
+    return response({ archive_id: 'archive_001', status: 'completed', messages: rows })
+  }
+  const snapshot = async (targetUri: string) => ({
+    uri: targetUri, digest: 'original', content: `Always use the compiler wrapper.\n${uri}/messages.jsonl#L25`,
+  })
+  const audit = await collectOpenVikingAudit(cli, snapshot, signal, run)
+  expect(audit.packs[0]?.evidence).toHaveLength(20)
+  expect(audit.packs[0]?.evidence).toEqual(expect.arrayContaining([
+    expect.objectContaining({ source: `${uri}/messages.jsonl#L25`, kind: 'tool-result' }),
+    expect.objectContaining({ source: `${uri}/messages.jsonl#L26` }),
+  ]))
 })
 
 it('reads Codex and other completed archives by default and reports an incomplete archive', async () => {

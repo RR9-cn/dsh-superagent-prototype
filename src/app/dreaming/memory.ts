@@ -84,6 +84,12 @@ const readConfig = async () => {
   return config.parse(JSON.parse(await readFile(path, 'utf8')))
 }
 
+/** Partitions local archive evidence by the configured service and access credential. */
+export async function openVikingEvidenceScope(): Promise<string> {
+  const { url, api_key } = await readConfig()
+  return hash(`${url}\0${api_key}`)
+}
+
 /** Uses OpenViking's exact, metadata-preserving edit tool and verifies the indexed memory. */
 export function openVikingMemory(cli: string, lifetime: AbortSignal, http = fetch, run: PilotCommand = pilotCommand,
   connection = readConfig): MemoryPort & MemoryCleanupPort & { snapshot(uri: string): Promise<MemorySnapshot> } {

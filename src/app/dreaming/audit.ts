@@ -1,14 +1,25 @@
 import { setTimeout as wait } from 'node:timers/promises'
 import { key } from '../../core/ids.ts'
 import { pilotCommand, type PilotCommand } from '../../infra/pilot-cli.ts'
+import { family } from '../../kv.ts'
+import type { Store } from '../store.ts'
 import type { DreamingEvidencePack } from './dreaming.ts'
-import { memoryUri, type MemoryPort } from './memory.ts'
-import { collectOpenVikingEvidence, listOpenVikingDirectory } from './openviking.ts'
+import { memoryUri, openVikingEvidenceScope, type MemoryPort } from './memory.ts'
+import { collectOpenVikingEvidence, listOpenVikingDirectory, type ArchiveEvidenceCache, type CachedArchiveEvidence } from './openviking.ts'
 
 const home = 'viking://~/'
 const peerPath = /^viking:\/\/~\/peers\/([\w.@-]+)\//
 const memoryLimit = 12_000
 const evidenceLimit = 20
+const archiveCitation = /(viking:\/\/(?:~|user\/[^/\s]+)\/sessions\/[\w.@-]+\/history\/archive_\d+)\/messages\.jsonl#L(\d+)\b/gu
+const archiveEvidence = family<CachedArchiveEvidence, [string, string]>('dreaming-archive-evidence:')
+
+async function archiveCache(store: Pick<Store, 'get' | 'set' | 'delete'>): Promise<ArchiveEvidenceCache | undefined> {
+  const scope = await openVikingEvidenceScope().catch(() => undefined)
+  if (!scope) return undefined
+  const entry = (uri: string) => archiveEvidence(scope, key(uri))
+  return { get: uri => store.get(entry(uri)), set: (uri, value) => store.set(entry(uri), value), delete: uri => store.delete(entry(uri)) }
+}
 
 async function listMemories(cli: string, signal: AbortSignal, run: PilotCommand) {
   const pending = [`${home}memories`, `${home}peers`]
@@ -61,22 +72,37 @@ function terms(text: string): Set<string> {
 }
 
 function indexArchives(packs: DreamingEvidencePack[]) {
-  return packs.map(pack => ({ pack, excerpts: pack.evidence.map(item => ({ item, terms: terms(item.text) })) }))
+  return packs.flatMap(pack => {
+    if (!pack.archiveUri) return []
+    const prefix = key(pack.archiveUri).slice(0, 12)
+    return [{ uri: pack.archiveUri, project: pack.project, excerpts: pack.evidence.map(item => ({
+      item: { ...item, id: `${prefix}:${item.id}` }, line: Number(/^m(\d+)p/.exec(item.id)?.[1]), terms: terms(item.text),
+    })) }]
+  })
 }
 
 function selectEvidence(target: NonNullable<DreamingEvidencePack['target']>, history: ReturnType<typeof indexArchives>) {
   const project = peerPath.exec(target.uri)?.[1]
   const query = terms(target.content)
-  const ranked = history.flatMap(({ pack, excerpts }) => {
-    if (!pack.archiveUri || (project && pack.project !== project)) return []
-    const cited = target.content.includes(`${pack.archiveUri}/`) || target.content.includes(`${pack.archiveUri} `)
-    const items = excerpts.map(({ item, terms }) => {
+  const citations = new Map<string, Set<number>>()
+  for (const [, uri, line] of target.content.matchAll(archiveCitation)) {
+    const homeUri = uri!.replace(/^viking:\/\/user\/[^/]+\//, home)
+    const lines = citations.get(homeUri) ?? new Set<number>()
+    lines.add(Number(line))
+    citations.set(homeUri, lines)
+  }
+  const ranked = history.flatMap(({ uri, project: archivedProject, excerpts }) => {
+    if (project && archivedProject !== project) return []
+    const cited = citations.get(uri)
+    const items = excerpts.map(({ item, line, terms }) => {
       const overlap = [...terms].filter(term => query.has(term)).length
-      return { item: { ...item, id: `${pack.id.slice(0, 12)}:${item.id}` }, score: overlap + (cited ? 1000 : 0) }
+      const proximity = cited?.has(line) ? 2 : cited?.has(line - 1) || cited?.has(line + 1) ? 1 : 0
+      return { item, overlap, proximity }
     })
-    return items.filter(({ score }) => score > 0)
+    return items.filter(({ overlap, proximity }) => overlap > 0 || proximity > 0)
   })
-  const selected = new Set(ranked.toSorted((a, b) => b.score - a.score).slice(0, evidenceLimit))
+  const selected = new Set(ranked.toSorted((a, b) => b.proximity - a.proximity || b.overlap - a.overlap ||
+    Number(b.item.kind === 'tool-result') - Number(a.item.kind === 'tool-result')).slice(0, evidenceLimit))
   return ranked.filter(item => selected.has(item)).map(({ item }) => item)
 }
 
@@ -107,9 +133,9 @@ export async function collectOpenVikingMemories(cli: string, snapshot: MemoryPor
 
 /** Combines each memory snapshot with bounded evidence from the visible archive catalog. */
 export async function collectOpenVikingAudit(cli: string, snapshot: MemoryPort['preview'], signal: AbortSignal,
-  run: PilotCommand = pilotCommand) {
+  run: PilotCommand = pilotCommand, store?: Pick<Store, 'get' | 'set' | 'delete'>) {
   const { targets, skipped, unavailable, total } = await collectOpenVikingMemories(cli, snapshot, signal, run)
-  const archives = targets.length ? await collectOpenVikingEvidence(cli, signal, run)
+  const archives = targets.length ? await collectOpenVikingEvidence(cli, signal, run, store ? await archiveCache(store) : undefined)
     : { packs: [], total: 0, unavailable: [], skipped: [] }
   const history = indexArchives(archives.packs)
   const packs = targets.map(target => {

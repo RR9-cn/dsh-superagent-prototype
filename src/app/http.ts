@@ -206,7 +206,7 @@ function routes(runtime: HttpHost): Routes {
       const source = runtime.machine?.dreamingOpenViking
       if (!source) return runtime.dreaming.start()
       const signal = AbortSignal.any([AbortSignal.timeout(180_000), ...(runtime.lifetime ? [runtime.lifetime] : [])])
-      return preparingDreaming ??= collectOpenVikingAudit(source.cli, memory(signal).snapshot, signal).then(result => {
+      return preparingDreaming ??= collectOpenVikingAudit(source.cli, memory(signal).snapshot, signal, undefined, store).then(result => {
         signal.throwIfAborted()
         return runtime.dreaming.startAll(result)
       }, () => { throw new DreamingConflict('Unable to prepare OpenViking memories and archive evidence for Dreaming') })
