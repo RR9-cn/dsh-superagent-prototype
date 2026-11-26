@@ -23,6 +23,7 @@ export const Config = s.object({
   hiFoxEnabled: s.boolean().default(false).description('Mount the scoped HiFox pilot.'),
   hiFoxCli: s.string().default('hifox'),
   hiFoxSpace: s.string(),
+  codexProjectPaths: s.array(absolute('Local workspace to check for committed delivery and original Codex session evidence.')),
   // Retired pilot fields are accepted so existing DSH profiles can still load.
   hiFoxAgent: s.string(),
   hiFoxComputer: s.string(),
@@ -45,7 +46,7 @@ export const Config = s.object({
 })
 export type DeploymentConfig = ReturnType<typeof Config>
 type HiFoxSettings = Pick<DeploymentConfig, 'hiFoxEnabled' | 'hiFoxCli' | 'hiFoxSpace'
-  | 'dingTalkCli' | 'dingTalkProfile' | 'dingTalkRepliesEnabled'>
+  | 'dingTalkCli' | 'dingTalkProfile' | 'dingTalkRepliesEnabled'> & Partial<Pick<DeploymentConfig, 'codexProjectPaths'>>
 export interface Machine {
   stateDir: string
   repositoryPath?: string
@@ -66,8 +67,9 @@ export function machineOf(config: DeploymentConfig): Machine {
   const unknown = Object.keys(config).filter(key => !(key in (Config.dict ?? {})))
   if (unknown.length) throw new Error(`dsh-superagent configuration has keys it does not use: ${unknown.map(key => MOVED[key] ? `${key} (now ${MOVED[key]})` : key).join(', ')}; docs/006-deployment.md lists the keys`)
   const { stateDir, repositoryPath, dreamingOpenVikingCli, dreamingAutoMaintenance, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs,
-    hiFoxEnabled, hiFoxCli, hiFoxSpace, dingTalkCli, dingTalkProfile, dingTalkRepliesEnabled } = config
-  const hiFoxSettings = { hiFoxEnabled, hiFoxCli, hiFoxSpace, dingTalkCli, dingTalkProfile, dingTalkRepliesEnabled }
+    hiFoxEnabled, hiFoxCli, hiFoxSpace, codexProjectPaths, dingTalkCli, dingTalkProfile, dingTalkRepliesEnabled } = config
+  const hiFoxSettings = { hiFoxEnabled, hiFoxCli, hiFoxSpace, dingTalkCli, dingTalkProfile, dingTalkRepliesEnabled,
+    ...(codexProjectPaths?.length ? { codexProjectPaths } : {}) }
   return { stateDir, ...(repositoryPath ? { repositoryPath } : {}), hiFoxSettings,
     ...(dreamingOpenVikingCli ? { dreamingOpenViking: { cli: dreamingOpenVikingCli, automatic: dreamingAutoMaintenance } } : {}),
     promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs }

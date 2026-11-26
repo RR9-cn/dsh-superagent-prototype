@@ -27,6 +27,25 @@ it('shows the two exact URIs and waits for explicit duplicate deletion confirmat
   expect(text()).toContain(zh['dreaming.duplicateStatus.verified'])
 })
 
+it('keeps automatic merge results collapsed without a confirmation control', async () => {
+  const root = 'viking://~/memories/experiences/'
+  const keep = { uri: root + 'test_setup.md', digest: 'keep', content: 'Configuration from the project root.' }
+  const source = { uri: root + 'test setup.md', digest: 'source', content: 'Logs show the resolved configuration file.' }
+  server.dreaming = { mode: 'dsh', openViking: true, canStart: true, pack: null, published: null, bulk: null, batches: [],
+    merges: [{ id: 'pending', keep, source, status: 'proposed' }] }
+  await mount()
+  await click(zh['tab.dreaming'])
+  const list = find(zh['dreaming.mergeResults'].replace('{count}', '1'), 'summary')
+  const item = find(`test_setup.md · ${zh['dreaming.mergeStatus.proposed']}`, 'summary')
+  expect(list.closest('details')?.open).toBe(false)
+  expect(item.closest('details')?.open).toBe(false)
+  await click(list)
+  await click(item)
+  expect(text()).toContain(source.uri)
+  expect(item.closest('details')?.querySelector('button')).toBeNull()
+  expect(server.requests.some(request => request.path.includes('/merges/'))).toBe(false)
+})
+
 it('starts one-click correction directly and keeps manual editing available separately', async () => {
   server.dreaming = { mode: 'dsh', openViking: true, canStart: true, pack: null, published: null, bulk: null, batches: [{
     id: 'batch-1', baseVersion: 0, pack: { id: 'evidence', project: 'example', evidence: [

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Dreaming, type DreamingAgentPort, type DreamingEvidencePack } from '../src/app/dreaming/dreaming.ts'
 import type { MemoryCleanupPort } from '../src/app/dreaming/duplicates.ts'
+import type { MemoryMergePort } from '../src/app/dreaming/merges.ts'
 import type { MemoryPort } from '../src/app/dreaming/memory.ts'
 import { Effects } from '../src/app/effects.ts'
 import { Store } from '../src/app/store.ts'
@@ -397,6 +398,91 @@ it('checks both duplicate versions, deletes only the confirmed old URI, and retr
   }
 })
 
+it.each(['merge', 'changed', 'skip', 'bad-evidence'])('automatically processes complementary memory candidates (%s)', async outcome => {
+  const directory = mkdtempSync(join(tmpdir(), 'dreaming-merge-'))
+  const store = new Store(join(directory, 'db.sqlite'))
+  let now = Date.parse('2026-11-26T17:00:00.000Z')
+  const effects = new Effects(store, new HealthBoard(), () => now)
+  let assessments = 0
+  const dreaming = new Dreaming(store, effects, {
+    sessionId: id => id, cancel: () => true, async advance() { return 'finished' },
+    async assessMerge({ keep, source }) {
+      assessments++
+      if (outcome === 'skip') return { outcome: 'skip', reason: 'Incompatible guidance' }
+      return { outcome: 'merge', reason: 'Complementary steps',
+        keepPassage: keep.content.split('\n')[0]!,
+        sourcePassage: outcome === 'bad-evidence' ? 'Unsupported quotation.' : source.content.split('\n')[0]! }
+    },
+  }, new AbortController().signal)
+  const root = 'viking://~/memories/experiences/'
+  const keep = { uri: root + 'test_config_paths.md', digest: 'keep',
+    content: 'Configuration is read from the working directory.\n\nviking://~/sessions/session1/history/archive_001/messages.jsonl#L1' }
+  const old = { uri: root + 'test config paths.md', digest: 'old',
+    content: 'The wrapper prints its resolved configuration path.\n\nviking://~/sessions/session2/history/archive_002/messages.jsonl#L3' }
+  const entries = new Map([[keep.uri, keep], [old.uri, old]])
+  const actions: string[] = []
+  let before = false
+  let after = false
+  const memory: MemoryPort & MemoryMergePort = {
+    async find() { return [] },
+    async preview() { return keep },
+    async prepare(patch) { return { ...patch, updatedDigest: 'merged', status: 'staged' } },
+    async apply(edit) { actions.push('write'); entries.set(keep.uri, { ...keep, digest: 'merged', content: edit.replacement }) },
+    async readForDeletion(uri) { return entries.get(uri) ?? null },
+    async deleteExact(uri) { actions.push('delete'); expect(uri).toBe(old.uri); entries.delete(uri) },
+    async verifyRemoval() { throw new Error('Unexpected duplicate verification') },
+    async recallsMerge(plan, sourceAbsent) {
+      expect(plan.queries).toHaveLength(2)
+      expect(plan.queries[1]).toContain('resolved configuration path')
+      actions.push(sourceAbsent ? 'recall after' : 'recall before')
+      if (before && !sourceAbsent && outcome === 'changed') entries.set(old.uri, { ...old, digest: 'changed' })
+      return sourceAbsent ? after : before
+    },
+  }
+  try {
+    const other = { ...old, uri: 'viking://~/peers/other/memories/experiences/test_config_paths.md' }
+    expect(dreaming.scanDuplicates({ targets: [keep, old, other], total: 3, skipped: [], unavailable: [] }).ids).toEqual([])
+    const plans = dreaming.view().merges!
+    expect(plans).toMatchObject([{ keep: { uri: keep.uri }, source: { uri: old.uri }, status: 'proposed' }])
+    expect(actions).toEqual([])
+    // Enabling automatic maintenance also resumes candidates saved before startup.
+    dreaming.enableMaintenance(memory, async () => { throw new Error('Automatic audit is not due') }, () => false, () => now)
+    effects.start()
+    await effects.idle('dreaming-merge')
+    const status = () => dreaming.view().merges![0]!.status
+    if (outcome === 'skip' || outcome === 'bad-evidence') {
+      expect(status()).toBe('skipped')
+      expect(actions).toEqual([])
+      return
+    }
+    expect(status()).toBe('waiting_for_recall')
+    expect(actions).toEqual(['write', 'recall before'])
+    expect(entries.get(keep.uri)!.content).toContain(keep.content)
+    expect(entries.get(keep.uri)!.content).toContain(old.content)
+    expect(entries.get(keep.uri)!.content).toContain(old.uri)
+    expect(entries.get(old.uri)).toEqual(old)
+    before = true
+    now += 60_000
+    await effects.idle('dreaming-merge')
+    if (outcome === 'changed') {
+      expect(status()).toBe('blocked')
+      expect(actions).toEqual(['write', 'recall before', 'recall before'])
+      return
+    }
+    expect(status()).toBe('checking_removal')
+    after = true
+    now += 60_000
+    await effects.idle('dreaming-merge')
+    expect(status()).toBe('verified')
+    expect(assessments).toBe(1)
+    expect(actions).toEqual(['write', 'recall before', 'recall before', 'delete', 'recall after', 'recall after'])
+  } finally {
+    await effects.drain()
+    store.close()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
 it('runs automatic corrections and duplicate cleanup at 02:00 Beijing time', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'dreaming-maintenance-'))
   const store = new Store(join(directory, 'db.sqlite'))
@@ -409,10 +495,11 @@ it('runs automatic corrections and duplicate cleanup at 02:00 Beijing time', asy
   const remove = { ...keep, uri: root + 'test setup.md' }
   const removed: string[] = []
   const applied: string[] = []
-  const memory: MemoryPort & MemoryCleanupPort = {
+  const memory: MemoryPort & MemoryMergePort = {
     async readForDeletion(uri) { return uri === keep.uri ? keep : removed.includes(uri) ? null : remove },
     async deleteExact(uri) { removed.push(uri) },
     async verifyRemoval() { return true },
+    async recallsMerge() { throw new Error('No assessed merge') },
     async find() { throw new Error('The audit is already bound to an original URI') },
     async preview() { return target },
     async prepare(patch) { return { ...patch, updatedDigest: 'updated', status: 'staged' } },

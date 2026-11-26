@@ -332,6 +332,7 @@ The app still has a few channel-specific integrations:
 | `src/app/dreaming/dreaming.ts` | Persists Dreaming batches, validated Agent proposals, reviews and local replay snapshots |
 | `src/app/dreaming/duplicates.ts` | Identifies identical memories and approved replacements with exact versions to retain and remove |
 | `src/app/dreaming/openviking.ts` | Reads bounded evidence from a manually selected completed OpenViking Codex archive |
+| `src/app/dreaming/merges.ts` | Shortlists complementary memories, validates the merge assessment and composes a retained body with provenance |
 | `src/app/dreaming/memory.ts` | Stages exact OpenViking memory edits, performs guarded writes and verifies scoped retrieval |
 | `src/app/retry-health.ts` | `RetryHealth`: which Sessions wait on a model budget retry, for the `models` health entry |
 | `src/app/role-models.ts` | Resolves the Eval and Executor models, and seeds a new Session with its role's model |
@@ -354,7 +355,9 @@ The app still has a few channel-specific integrations:
 | `src/app/views/settings.ts` | The settings page's view: each block with its revision, each Source's settings with its kind's form, and the execution environment |
 | `src/app/views/overview.ts` | The overview: Tickets that need a person, problems, the last day's flow and the Executor's load |
 | `src/executor/dsh.ts` | The DshExecutor, `WorkerSlots`, `ticketExecution`, `inputMessage` and `mandateInstructions` |
-| `src/executor/hifox.ts` | The opt-in HiFox executor, durable write intents, Run reconciliation and result acceptance |
+| `src/executor/codex-desktop.ts` | Reads local Codex Desktop projects and sessions and opens a session in a verified project through the Desktop tasks relay |
+| `src/executor/codex-history.ts` | Verifies per-card delivery against local original Codex sessions and committed Git artifacts |
+| `src/executor/hifox.ts` | The opt-in HiFox executor, durable write intents, Run reconciliation and linked Codex execution |
 | `src/executor/hifox-port.ts` | HiFox pilot scope, transport and independent evidence contracts |
 | `src/executor/background.ts` | A worker's background work in DeepSeek Harness, the shell jobs its Session owns (`ctx.jobs`) and its subagents (`ctx.subagents`): `runningJobs`, `untilQuiet`, `killJobs`, `collectJobs`, `stopSubagents`, `stopBackground`, `until`, and `cancelled`, the workers whose turn a stop of their subagents cancelled |
 | `src/infra/repository.ts` | Bounded assessment reads from the committed HEAD of the configured local Git worktree |

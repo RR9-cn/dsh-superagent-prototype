@@ -2,6 +2,8 @@ import { z } from 'zod'
 import type { OutboundMessage } from '../core/index.ts'
 import { dingTalkPilotScope, type DingTalkIntakeResult, type DingTalkMessage } from '../sources/dingtalk.ts'
 import type { DingTalkListener } from '../sources/dingtalk-listener.ts'
+import type { CodexDesktop } from './codex-desktop.ts'
+import type { CodexHistory } from './codex-history.ts'
 
 const reference = z.string().regex(/^[\w:@.+/=-]{1,160}$/)
 export const hiFoxScope = dingTalkPilotScope.extend({
@@ -78,6 +80,7 @@ export interface HiFoxGateway {
   createTask(input: { space: string; marker: string; title: string; description: string }, signal: AbortSignal): Promise<TaskReceipt>
   findTasks(space: string, marker: string, signal: AbortSignal): Promise<TaskReceipt[]>
   taskStatus(taskUuid: string, signal: AbortSignal): Promise<HiFoxTaskStatus>
+  taskContent?(taskUuid: string, signal: AbortSignal): Promise<string>
   setTaskStatus(taskUuid: string, target: HiFoxTaskTarget, signal: AbortSignal): Promise<HiFoxTaskStatus>
   comment(input: { taskUuid: string; marker: string; text: string }, signal: AbortSignal): Promise<CommentReceipt>
   findComments(taskUuid: string, marker: string, signal: AbortSignal): Promise<CommentReceipt[]>
@@ -93,6 +96,8 @@ export interface HiFoxGateway {
 export interface HiFoxPilot {
   scope: z.input<typeof hiFoxScope>
   gateway: HiFoxGateway
+  codexDesktop?: CodexDesktop
+  codexHistory?: CodexHistory
   /** Expose the pilot ingress at ding.sock in Runtime's private state directory. */
   dingTalkSocket?: boolean
   /** In the standard desktop deployment, listen explicitly through the DWS child process. */

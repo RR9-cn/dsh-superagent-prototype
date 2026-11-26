@@ -35,6 +35,7 @@ import { preview, readable } from '../src/app/views/text.ts'
 import { decisionList, search, threadDetail, threadList } from '../src/app/views/threads.ts'
 import { executorLoad, ticketDetail, ticketList } from '../src/app/views/tickets.ts'
 import type { DingTalkMessage } from '../src/sources/dingtalk.ts'
+import { matchCodexWork } from '../src/executor/codex-desktop.ts'
 import { terminalTask, type CommentReceipt, type HiFoxGateway, type HiFoxPilot, type HiFoxTaskStatus, type HiFoxWorkOrder,
   type RunObservation, type TaskReceipt } from '../src/executor/hifox-port.ts'
 
@@ -1592,11 +1593,11 @@ async function startPilot(pilot: HiFoxPilot): Promise<void> {
   await runtime.ready
   runtime.sources.register(feishuKind)
 }
-async function acceptPilot(message = dingTalkMessage('original')): Promise<string> {
+async function acceptPilot(message = dingTalkMessage('original'), title = '测试环境排障'): Promise<string> {
   expect(runtime.receiveDingTalk(message)).toBe('stored')
   await runtime.idle()
   const triggerId = key('dingtalk', message.conversationId, message.messageId)
-  const result = await route({ kind: 'accept', trigger_id: triggerId, hifox_agent_id: 'configured-agent', hifox_agent_reason: '日志排查', title: '测试环境排障', acknowledgement: '收到，核对该请求的测试日志。' })
+  const result = await route({ kind: 'accept', trigger_id: triggerId, hifox_agent_id: 'configured-agent', hifox_agent_reason: '日志排查', title, acknowledgement: '收到，核对该请求的测试日志。' })
   const ticketId = (result.ticket as { ticket_id: string }).ticket_id
   expect(runtime.store.tickets.get(ticketId)?.executionTarget).toBe('hifox')
   return ticketId
@@ -1611,6 +1612,138 @@ const hasPythonBridgeRuntime = typeof process.getuid === 'function'
   && spawnSync('python3', ['-B', '-c', 'import sys; raise SystemExit(sys.version_info < (3, 9))']).status === 0
 
 describe('DingTalk HiFox pilot', () => {
+  it('finishes two original cards independently from one local Codex session and preserves the result across restart', async () => {
+    const remote = fakeHiFox()
+    await startPilot(remote.pilot)
+    const backend = await acceptPilot(dingTalkMessage('backend'), '后端计算')
+    remote.finish(0, { outcome: 'blocked', summary: '等待项目' })
+    await advancePilot()
+    const client = await acceptPilot(dingTalkMessage('client'), '客户端展示')
+    remote.finish(1, { outcome: 'blocked', summary: '等待项目' })
+    await advancePilot()
+    const delivery = vi.fn(async ({ title }: { title: string }) => ({ threadId: 'same-session', evidenceLines: title === '后端计算' ? [1, 2] : [2, 3],
+      summary: title === '后端计算' ? '接口返回已核验' : 'App 展示和提交已核验' }))
+    const pilot = { ...remote.pilot, codexHistory: { delivery } }
+    for (let pass = 0; pass < 2; pass++) {
+      await restart({}, {}, pilot)
+      await runtime.ready
+      await advancePilot()
+    }
+    expect(remote.statuses.get('task-1')?.category).toBe('completed')
+    expect(remote.statuses.get('task-2')?.category).toBe('completed')
+    expect(remote.comments.filter(row => row.text.includes('已核验')).map(row => [row.taskUuid, row.text.split('\n').at(-1)])).toEqual([
+      ['task-1', '接口返回已核验'], ['task-2', 'App 展示和提交已核验'],
+    ])
+    expect(runtime.store.tickets.get(backend)?.ended?.outcome).toBe('completed')
+    expect(runtime.store.tickets.get(client)?.ended?.outcome).toBe('completed')
+    expect(remote.gateway.summon).toHaveBeenCalledTimes(2)
+    expect(delivery).toHaveBeenCalledTimes(2)
+  })
+
+  it('requires overlap with specific card content when evaluating a Codex session', () => {
+    const project = { id: 'crm-project', name: 'crm-admin', cwd: '/work/crm-admin' }
+    const summary = '检查 CRM 中间件超时。注意下载文件，核对命令与资料。'
+    expect(matchCodexWork('注意下载文件，核对命令和 CRM 资料。', [project],
+      [{ id: 'unrelated', projectId: project.id, title: '排查超时', status: 'active', summary }],
+      'CRM 后台佣金申请列表的 sourceType 必须支持旺宝来源')).toBeUndefined()
+  })
+
+  it('rechecks blocked HiFox cards against Codex work summaries after restart without starting duplicate work', async () => {
+    const remote = fakeHiFox()
+    await startPilot(remote.pilot)
+    const id = await acceptPilot()
+    remote.finish(0, { outcome: 'blocked', summary: '请提供项目。' })
+    await advancePilot()
+    expect(lastPilotReport(id)?.state).toBe('blocked')
+
+    const project = { id: 'tax-project', name: 'tax-app', cwd: '/work/tax-app' }
+    const taskContent = vi.fn(async () => '移动端计算税额，覆盖优惠券、舍入和分摊的组合。')
+    const desktop = {
+      projects: vi.fn(async () => [project]),
+      threads: vi.fn(async () => [{ id: 'already-running', projectId: project.id, title: '迭代开发', status: 'active',
+        summary: '在做本轮迭代。' }]),
+      content: vi.fn(async () => '检查优惠券导致的税额偏差，并为分摊及舍入补齐回归。'),
+      status: vi.fn(async () => 'active'), create: vi.fn(async () => 'duplicate'),
+    }
+    await restart({}, {}, { ...remote.pilot, gateway: { ...remote.gateway, taskContent }, codexDesktop: desktop })
+    await runtime.ready
+    await advancePilot()
+    expect(taskContent).toHaveBeenCalledWith('task-1', expect.any(AbortSignal))
+    expect(runtime.hiFox?.status(id)?.codex).toMatchObject({ threadId: 'already-running', project })
+    expect(lastPilotReport(id)?.state).toBe('progress')
+    expect(remote.comments.map(row => row.text).join('\n')).toContain('事项内容吻合')
+    expect(remote.gateway.summon).toHaveBeenCalledTimes(1)
+    expect(desktop.create).not.toHaveBeenCalled()
+    expect(remote.tasks).toHaveLength(1)
+  })
+
+  it('uses the busy Codex session to find its project, then tracks a new session on the same HiFox card', async () => {
+    const remote = fakeHiFox()
+    const project = { id: 'tax-project', name: 'tax-app', cwd: '/work/tax-app' }
+    const busy = { id: 'busy-thread', title: 'FSH-42 实现税点计算', projectId: project.id, status: 'active' }
+    const desktop = {
+      projects: vi.fn(async () => [project]), threads: vi.fn(async () => [busy]),
+      create: vi.fn(async () => 'new-thread'), status: vi.fn(async () => 'active'),
+    }
+    const pilot = { ...remote.pilot, codexDesktop: desktop }
+    await startPilot(pilot)
+    const ticketId = await acceptPilot(dingTalkMessage('original', { text: 'FSH-42 补上空值校验。' }))
+    await advancePilot()
+    expect(desktop.create).toHaveBeenCalledExactlyOnceWith(project, expect.stringContaining('[DSH '), expect.stringContaining('补上空值校验'), expect.any(AbortSignal))
+    expect(desktop.status).toHaveBeenCalledWith('new-thread', expect.any(AbortSignal))
+    expect(remote.comments.map(row => row.text).join('\n')).toContain('codex://threads/new-thread')
+    expect(remote.gateway.summon).not.toHaveBeenCalled()
+    expect(remote.statuses.get('task-1')?.name).toBe('进行中')
+    await restart({}, {}, pilot)
+    await runtime.ready
+    await advancePilot()
+    expect(desktop.create).toHaveBeenCalledTimes(1)
+    expect(runtime.hiFox?.status(ticketId)?.codex?.threadId).toBe('new-thread')
+    expect(remote.tasks).toHaveLength(1)
+  })
+
+  it('reconciles a lost Codex creation receipt by exact project and name without dispatching again', async () => {
+    const remote = fakeHiFox()
+    const project = { id: 'tax-project', name: 'tax-app', cwd: '/work/tax-app' }
+    const threads: { id: string; projectId: string; title: string; status: string }[] = []
+    const desktop = {
+      projects: vi.fn(async () => [project]), threads: vi.fn(async () => threads),
+      create: vi.fn(async (_project: typeof project, title: string) => {
+        threads.push({ id: 'recovered-thread', projectId: project.id, title, status: 'active' })
+        throw new Error('lost receipt')
+      }),
+      status: vi.fn(async () => 'active'),
+    }
+    const pilot = { ...remote.pilot, codexDesktop: desktop }
+    await startPilot(pilot)
+    const ticketId = await acceptPilot(dingTalkMessage('original', { text: 'tax-app 补上空值校验。' }))
+    expect(runtime.hiFox?.status(ticketId)?.codex?.pending).toBeDefined()
+    await restart({}, {}, pilot)
+    await runtime.ready
+    await advancePilot()
+    expect(runtime.hiFox?.status(ticketId)?.codex?.threadId).toBe('recovered-thread')
+    expect(desktop.create).toHaveBeenCalledTimes(1)
+    expect(remote.gateway.summon).not.toHaveBeenCalled()
+  })
+
+  it('links an idle exact Codex task and leaves conflicting project matches for confirmation', async () => {
+    const remote = fakeHiFox()
+    const project = { id: 'tax-project', name: 'tax-app', cwd: '/work/tax-app' }
+    const other = { id: 'other-project', name: 'other-app', cwd: '/work/other-app' }
+    const desktop = {
+      projects: vi.fn(async () => [project, other]),
+      threads: vi.fn(async () => [{ id: 'original-thread', title: 'FSH-42 实现税点计算', projectId: project.id, status: 'idle' }]),
+      create: vi.fn(async () => 'new-thread'), status: vi.fn(async () => 'idle'),
+    }
+    await startPilot({ ...remote.pilot, codexDesktop: desktop })
+    const linked = await acceptPilot(dingTalkMessage('original', { text: '继续跟进 FSH-42。' }))
+    expect(runtime.hiFox?.status(linked)?.codex?.threadId).toBe('original-thread')
+    const ambiguous = await acceptPilot(dingTalkMessage('another', { text: 'tax-app 和 other-app 的修复，请继续。' }))
+    expect(lastPilotReport(ambiguous)?.summary).toContain('多个可能的 Codex 项目')
+    expect(desktop.create).not.toHaveBeenCalled()
+    expect(remote.gateway.summon).not.toHaveBeenCalled()
+  })
+
   it('accepts addressed requests across conversations and isolates equal message and quote IDs', async () => {
     const remote = fakeHiFox()
     await startPilot({ ...remote.pilot, scope: { space: 'space-test' }, requireTerminalOrigin: true })

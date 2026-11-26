@@ -4,7 +4,8 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { z } from 'zod'
 import { pilotCommand, readPilotJson, type PilotCommand } from '../../infra/pilot-cli.ts'
-import type { MemoryCleanupPort, MemorySnapshot } from './duplicates.ts'
+import type { MemorySnapshot } from './duplicates.ts'
+import type { MemoryMergePort } from './merges.ts'
 import { OpenVikingThrottled, retryOpenVikingRead } from './openviking.ts'
 
 export const memoryUri = z.string().trim().max(600).refine(value => {
@@ -14,7 +15,7 @@ export const memoryUri = z.string().trim().max(600).refine(value => {
 const digestField = z.string().regex(/^[a-f0-9]{64}$/)
 export const memoryPatch = z.object({ uri: memoryUri, digest: digestField, previous: z.string().min(1).max(12_000),
   replacement: z.string().min(1).max(12_000), query: z.string().trim().min(1).max(500) }).strict()
-export type MemoryPatch = z.infer<typeof memoryPatch> & { digestKind?: 'visible' }
+export type MemoryPatch = z.infer<typeof memoryPatch> & { digestKind?: 'visible'; supplement?: true }
 export type MemoryWriteCode = 'unsafe_uri' | 'redirected_uri' | 'body_unconfirmed' | 'recall_pending'
 export type MemoryEdit = MemoryPatch & { updatedDigest: string; status: 'staged' | 'writing' | 'blocked' | 'conflict' | 'pending_verification' | 'verified';
   error?: string; errorCode?: MemoryWriteCode }
@@ -46,9 +47,10 @@ function ensureExactWriteUri(uri: string) {
   }
 }
 
-function replacePassage(content: string, { previous, replacement }: MemoryPatch): string {
+function replacePassage(content: string, { previous, replacement, supplement }: MemoryPatch): string {
   const index = content.indexOf(previous)
-  if (index < 0 || index !== content.lastIndexOf(previous) || replacement.includes(previous)) {
+  if (index < 0 || index !== content.lastIndexOf(previous) ||
+    (supplement ? content !== previous || !replacement.startsWith(previous + '\n\n') : replacement.includes(previous))) {
     throw new MemoryWriteError('conflict', 'Select one unique original passage and replace it with a materially different correction')
   }
   return content.slice(0, index) + replacement + content.slice(index + previous.length)
@@ -92,7 +94,7 @@ export async function openVikingEvidenceScope(): Promise<string> {
 
 /** Uses OpenViking's exact, metadata-preserving edit tool and verifies the indexed memory. */
 export function openVikingMemory(cli: string, lifetime: AbortSignal, http = fetch, run: PilotCommand = pilotCommand,
-  connection = readConfig): MemoryPort & MemoryCleanupPort & { snapshot(uri: string): Promise<MemorySnapshot> } {
+  connection = readConfig): MemoryPort & MemoryMergePort & { snapshot(uri: string): Promise<MemorySnapshot> } {
   const request = async (path: string, options?: { uri?: string; body?: unknown; retryRead?: boolean; missingOkay?: boolean }) => {
     const settings = await connection()
     const base = new URL(settings.url)
@@ -166,6 +168,11 @@ export function openVikingMemory(cli: string, lifetime: AbortSignal, http = fetc
         if (matches.match_count) return false
       }
       return true
+    },
+    async recallsMerge(plan, sourceAbsent) {
+      const sets = await Promise.all(plan.queries.map(query => lookup(query, namespace(plan.keep.uri))))
+      return sets.every(hits => hits.some(hit => toHome(hit.uri) === plan.keep.uri) &&
+        (!sourceAbsent || !hits.some(hit => toHome(hit.uri) === plan.source.uri)))
     },
     async find(query, project) {
       const roots = ['viking://~/memories']
@@ -246,6 +253,7 @@ export function openVikingMemory(cli: string, lifetime: AbortSignal, http = fetc
       if (updated === undefined || hash(updated) !== edit.updatedDigest) {
         throw new MemoryWriteError('pending_verification', 'The updated text could not be confirmed at the original OpenViking URI', 'body_unconfirmed')
       }
+      if (edit.supplement) return
       try {
         const hits = await lookup(edit.query, namespace(edit.uri))
         const indexed = hits.find(hit => toHome(hit.uri) === edit.uri)

@@ -162,6 +162,8 @@ export function TicketPage({ id }: { id: string }) {
           : <span className="dt-mono">{data.hifox.taskUuid}</span>] as [string, ReactNode]] : []),
         ...(data.hifox.taskStatus ? [[t('hifoxTaskStatus'), data.hifox.taskStatus.name] as [string, ReactNode]] : []),
         ...(data.hifox.runId ? [[t('hifoxRun'), <span className="dt-mono">{data.hifox.runId}</span>] as [string, ReactNode]] : []),
+        ...(data.hifox.codexProject ? [['Codex', <span title={data.hifox.codexThreadId ?? undefined}>
+          {data.hifox.codexProject}{data.hifox.codexThreadId && <> · <span className="dt-mono">{data.hifox.codexThreadId}</span></>}</span>] as [string, ReactNode]] : []),
       ]} />
       {!data.hifox.taskUuid && <Hint>{t('hifoxNoTask')}</Hint>}
     </Section>}

@@ -2,6 +2,7 @@ import { expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
 import { openVikingMemory } from '../src/app/dreaming/memory.ts'
 import { findMemoryDuplicates } from '../src/app/dreaming/duplicates.ts'
+import type { MemoryMerge } from '../src/app/dreaming/merges.ts'
 import type { PilotCommand } from '../src/infra/pilot-cli.ts'
 
 const uri = 'viking://~/peers/example/memories/experiences/test.md'
@@ -46,6 +47,27 @@ it('deletes the literal URI and checks scoped recall and obsolete text', async (
   expect(await memory.verifyRemoval(pair)).toBe(true)
 })
 
+it('checks each merge query and rejects a stale result for the absorbed URI', async () => {
+  const old = uri.replace('test.md', 'former.md')
+  const snapshot = { uri, content: original, digest: 'original' }
+  const plan: MemoryMerge = { id: 'merge', keep: snapshot, source: { ...snapshot, uri: old },
+    queries: ['test project', 'wrapper path'], status: 'waiting_for_recall' }
+  let supplementaryRecall = false
+  let oldRecall = true
+  const run: PilotCommand = async (_, args) => {
+    const memories = [...(args.at(-1) === plan.queries[0] || supplementaryRecall ? [{ uri: canonical }] : []),
+      ...(oldRecall ? [{ uri: old }] : [])]
+    return { code: 0, stderr: '', stdout: JSON.stringify({ result: { memories } }) }
+  }
+  const memory = openVikingMemory('ov', new AbortController().signal, fetch, run, connection)
+  expect(await memory.recallsMerge(plan, false)).toBe(false)
+  supplementaryRecall = true
+  expect(await memory.recallsMerge(plan, false)).toBe(true)
+  expect(await memory.recallsMerge(plan, true)).toBe(false)
+  oldRecall = false
+  expect(await memory.recallsMerge(plan, true)).toBe(true)
+})
+
 function fixture(suffix?: string, receipt = 'OK') {
   let content = original
   let metadata = suffix ?? '<metadata>original</metadata>'
@@ -78,6 +100,18 @@ function fixture(suffix?: string, receipt = 'OK') {
   const restore = () => { content = original; metadata = suffix ?? '<metadata>original</metadata>' }
   return { memory, write, prepare, restore, setIndexed: () => { indexed = true }, change: () => { content += '\nUnreviewed change.' } }
 }
+
+it('can append the reviewed supplementary body while preserving stored metadata', async () => {
+  const { memory, write } = fixture()
+  const snapshot = await memory.snapshot(uri)
+  const suffix = '\n\n# Related memory\nVerify at the root.\n\nviking://~/sessions/example/history/archive_001/messages.jsonl#L4'
+  const edit = await memory.prepare({ uri, digest: snapshot.digest, digestKind: 'visible', query: 'Test setup',
+    supplement: true, previous: snapshot.content, replacement: snapshot.content + suffix })
+  await memory.apply(edit)
+  await memory.apply(edit)
+  expect(write).toHaveBeenCalledTimes(1)
+  expect((await memory.snapshot(uri)).content).toBe(original + suffix)
+})
 
 it('edits only the reviewed passage at the original URI and verifies updated retrieval', async () => {
   const f = fixture()

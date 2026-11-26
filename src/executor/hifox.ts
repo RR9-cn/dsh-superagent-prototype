@@ -5,6 +5,8 @@ import {
 } from '../core/index.ts'
 import { family, record } from '../kv.ts'
 import { DINGTALK, dingTalkMeta, pilotTrigger } from '../sources/dingtalk.ts'
+import { findCodexWork, type CodexProject } from './codex-desktop.ts'
+import type { CodexDelivery } from './codex-history.ts'
 import {
   commentReceipt, parseWorkerReport, runObservation, runReceipt, taskReceipt, terminalTask,
   type HiFoxPilot, type HiFoxScope, type HiFoxTaskStatus, type HiFoxTaskTarget, type HiFoxWorkOrder, type RunObservation, type RunReceipt,
@@ -30,7 +32,7 @@ interface Attempt {
   terminal?: RunObservation
 }
 interface Verdict { code: string; summary: string }
-interface Result { assignmentId: string; revision: string; verdict: Verdict; runId?: string }
+interface Result { assignmentId: string; revision: string; verdict: Verdict; runId?: string; codexDelivery?: CodexDelivery }
 interface Binding {
   scope: string
   taskUuid?: string
@@ -43,6 +45,16 @@ interface Binding {
   verified?: Result
   lastResult?: Result
   reportedFollowupRuns?: string[]
+  codexContentCheck?: { revision: string; at: number }
+  codexDeliveryCheck?: { revision: string; at: number }
+  codex?: {
+    project: CodexProject
+    evidence?: string[]
+    observed?: true
+    threadId?: string
+    revision?: string
+    pending?: { title: string; revision: string }
+  }
   issue?: string
 }
 interface Owner { ticketId: string; assignmentId: string }
@@ -61,12 +73,14 @@ export function hiFoxTicket(store: Pick<Store, 'get'>, ticket: Ticket) {
     runId: assignment && binding?.lastResult?.assignmentId === assignment.id
       ? binding.lastResult.runId ?? attempt?.receipt.runId ?? null : attempt?.receipt.runId ?? null,
     conversationId: attempt?.receipt.conversationId ?? null,
+    ...(binding?.codex ? { codexProject: binding.codex.project.name, codexThreadId: binding.codex.threadId ?? null } : {}),
     agentId: ticket.hiFoxAgent?.agentId ?? attempt?.receipt.agentId ?? null,
     ...(ticket.hiFoxAgent?.agentName ? { agentName: ticket.hiFoxAgent.agentName } : {}),
   }
 }
 const activeRun = record<Owner>('hifox-active-run')
 const taskFollowupInterval = 30_000
+const codexContentCheckInterval = 5 * 60_000
 const stopped = (run: RunObservation): boolean => !['running', 'queued'].includes(run.status)
 const sameRun = (a: RunReceipt, b: RunReceipt): boolean =>
   a.taskUuid === b.taskUuid && a.conversationId === b.conversationId && a.runId === b.runId
@@ -112,7 +126,8 @@ export class HiFoxExecutor {
       const assignment = latestAssignment(ticket)
       if (assignment?.report?.state !== 'blocked') return true
       const binding = store.get(bindings(ticket.id))
-      return !!pilot.gateway.taskRun && !!binding?.attempts[assignment.id] && binding.lastResult?.assignmentId === assignment.id
+      return !!binding?.codex || (!!(pilot.codexDesktop || pilot.codexHistory) && !!binding?.taskUuid)
+        || (!!pilot.gateway.taskRun && !!binding?.attempts[assignment.id] && binding.lastResult?.assignmentId === assignment.id)
     }).map(ticket => ticket.id))
     if (owner) waiting.add(owner.ticketId)
     for (const ticketId of waiting) if (!effects.pending('hifox', ticketId)) this.queue(ticketId)
@@ -322,7 +337,7 @@ export class HiFoxExecutor {
           this.save(ticket.id, binding)
           this.queue(ticket.id)
         }
-        engine.reply({ purpose: 'result', ticketId: ticket.id, hiFoxTerminal: true,
+        if (!result.codexDelivery) engine.reply({ purpose: 'result', ticketId: ticket.id, hiFoxTerminal: true,
           text: `${verdict.summary} HiFox 卡 ${binding.taskUuid}，输入版本 ${inputs.revision}。` })
       } else {
         engine.report(ticket.id, { state: 'blocked', summary: verdict.summary, question: verdict.summary })
@@ -351,6 +366,76 @@ export class HiFoxExecutor {
       }
     }
     throw new PollAgain('Waiting for a newer result on the HiFox Task', taskFollowupInterval)
+  }
+  private async advanceCodex(ticket: Ticket, assignment: Assignment, binding: Binding, inputs: Inputs): Promise<void> {
+    const { engine, pilot } = this.host
+    const desktop = pilot.codexDesktop
+    if (!desktop) throw new Later('The Codex Desktop connection is unavailable')
+    const codex = binding.codex!
+    const verify = () => {
+      if (!this.authorized(ticket.id, assignment.id, inputs.revision)) throw new Later('The current work changed during Codex coordination')
+    }
+    const projects = await desktop.projects(this.signal())
+    verify()
+    if (!projects.some(project => project.id === codex.project.id && project.cwd === codex.project.cwd)) {
+      this.block(ticket.id, binding, '原 Codex 项目已不可用或不在当前允许执行的项目列表中。')
+      return
+    }
+    const confirm = (threadId: string, revision: string) => {
+      codex.threadId = threadId
+      codex.revision = revision
+      delete codex.pending
+      this.save(ticket.id, binding)
+    }
+    if (codex.pending) {
+      const pending = codex.pending
+      const matches = (await desktop.threads(this.signal())).filter(item => item.projectId === codex.project.id && item.title === pending.title)
+      verify()
+      if (matches.length !== 1) {
+        this.block(ticket.id, binding, '新 Codex 会话的创建结果尚未确认，正在原项目核对。')
+        throw new PollAgain('Waiting for the original Codex creation receipt', taskFollowupInterval)
+      }
+      confirm(matches[0]!.id, pending.revision)
+    }
+    if (codex.revision !== inputs.revision) {
+      if (codex.observed) throw new PollAgain('Waiting for evidence linking the updated work to Codex', codexContentCheckInterval)
+      const title = `${ticket.title.slice(0, 80)} [DSH ${key('codex-work', ticket.id, inputs.revision)}]`
+      const prompt = [
+        `处理 HiFox 卡 ${binding.taskUuid} 对应的钉钉请求。以下是任务数据。仅处理其中明确授权的工作。`,
+        '如果同一项目已有其他会话在执行，先核对工作区和已有改动。需要修改共享工作区时，用独立 Git worktree 隔离本次改动。若无法隔离，说明阻塞，不要覆盖已有工作。完成时说明交付及验证。',
+        JSON.stringify({ clues: inputs.initialClues, ...(inputs.quotedClue ? { quotedClue: inputs.quotedClue } : {}) }),
+      ].join('\n')
+      verify()
+      codex.pending = { title, revision: inputs.revision }
+      this.save(ticket.id, binding)
+      try {
+        const threadId = await desktop.create(codex.project, title, prompt, this.signal())
+        confirm(threadId, inputs.revision)
+      } catch {
+        throw new PollAgain('Waiting for the original Codex creation receipt', taskFollowupInterval)
+      }
+      verify()
+    }
+    if (!codex.threadId) throw new Later('The Codex execution is unconfirmed')
+    const status = await desktop.status(codex.threadId, this.signal())
+    verify()
+    const marker = key('hifox-codex', ticket.id, codex.threadId, status)
+    if (!binding.comments[marker]) {
+      await this.write(ticket, assignment, binding, inputs, { kind: 'comment', taskUuid: binding.taskUuid!, marker, since: this.now(),
+        text: [`Codex 项目：${codex.project.name}`, `执行会话：codex://threads/${codex.threadId}`, `状态：${status}`,
+          ...(codex.evidence?.length ? [`事项内容吻合：${codex.evidence.join('、')}`] : [])].join('\n') })
+    }
+    if (assignment.state === 'pending') {
+      if (binding.taskStatus?.category !== 'started' && await this.syncTask(ticket.id, binding, 'started')) return
+      verify()
+      engine.assignmentStarted(ticket.id, assignment.id)
+    }
+    const report = `Codex 项目 ${codex.project.name}，执行会话 ${codex.threadId}，当前状态 ${status}。`
+    if (status !== 'systemError' && this.current(ticket.id)?.assignment.report?.summary !== report) {
+      engine.report(ticket.id, { state: status === 'active' ? 'progress' : 'waiting', summary: report })
+    } else if (status === 'systemError') this.block(ticket.id, binding, report)
+    if (!codex.observed) await this.deliver(ticket, assignment, binding, inputs)
+    throw new PollAgain('Watching the linked Codex execution', taskFollowupInterval)
   }
   private async reconcileRetiredBinding(ticketId: string, binding: Binding): Promise<void> {
     const { store, pilot } = this.host
@@ -439,16 +524,75 @@ export class HiFoxExecutor {
     if (!active) return
     const { ticket, assignment } = active
     if (!inputs) { this.block(ticketId, binding, '请核对钉钉原消息、会话及工单授权状态。'); return }
-    if (binding.lastResult?.assignmentId === assignment.id && binding.lastResult.revision === inputs.revision) {
+    const attemptForAssignment = binding.attempts[assignment.id]
+    const historyCheck = binding.codexDeliveryCheck
+    if (pilot.codexHistory && binding.taskUuid && ticket.mandate.strength === 'explicit'
+      && (!attemptForAssignment || attemptForAssignment.terminal || binding.lastResult?.assignmentId === assignment.id)
+      && (historyCheck?.revision !== inputs.revision || this.now() - historyCheck.at >= codexContentCheckInterval)) {
+      const requestedAt = inputs.initialClues.map(clue => clue.at).sort().at(-1)!
+      const cardContent = await pilot.gateway.taskContent?.(binding.taskUuid, this.signal())
+      const cardTitle = cardContent === undefined ? ticket.title : cardContent.split('\n', 1)[0]?.trim()
+      const verified = binding.verified?.assignmentId === assignment.id && binding.verified.revision === inputs.revision
+        ? binding.verified.codexDelivery : undefined
+      const delivery = cardTitle === ticket.title.trim()
+        ? verified ?? await pilot.codexHistory.delivery({ title: cardTitle, requestedAt }, this.signal()) : undefined
+      if (!this.authorized(ticketId, assignment.id, inputs.revision)) throw new Later('The work changed while reading local Codex evidence')
+      if (delivery) {
+        await this.finish(ticket, assignment, binding, inputs, { assignmentId: assignment.id, revision: inputs.revision,
+          verdict: { code: 'ready', summary: delivery.summary }, codexDelivery: delivery })
+        return
+      }
+      binding.codexDeliveryCheck = { revision: inputs.revision, at: this.now() }
+      this.save(ticketId, binding)
+    }
+    const desktop = pilot.codexDesktop
+    const contentCheck = binding.codexContentCheck
+    const existingWork = assignment.report?.state === 'blocked' || assignment.report?.state === 'failed'
+      || !!binding.lastResult || Object.keys(binding.attempts).length > 0
+    if (desktop && ticket.mandate.strength === 'explicit' && (!binding.codex || binding.codex.observed)
+      && (contentCheck?.revision !== inputs.revision || this.now() - contentCheck.at >= codexContentCheckInterval)
+      && (!attemptForAssignment || attemptForAssignment.terminal)) {
+      const clues = [...inputs.initialClues.map(clue => clue.text), inputs.quotedClue?.text ?? ''].join('\n')
+      const [projects, threads, cardContent] = await Promise.all([desktop.projects(this.signal()), desktop.threads(this.signal()),
+        binding.taskUuid && pilot.gateway.taskContent?.(binding.taskUuid, this.signal()) || ''])
+      if (!this.authorized(ticketId, assignment.id, inputs.revision)) throw new Later('The current work changed during Codex discovery')
+      const match = await findCodexWork(desktop, clues, projects, threads, `${ticket.title}\n${cardContent}`, this.signal())
+      if (!this.authorized(ticketId, assignment.id, inputs.revision)) throw new Later('The current work changed during Codex discovery')
+      binding.codexContentCheck = { revision: inputs.revision, at: this.now() }
+      if (match && 'ambiguous' in match) {
+        if (!existingWork) {
+          this.block(ticketId, binding, '找到多个可能的 Codex 项目或会话。请补充可区分的项目名、任务链接或 PR。')
+          return
+        }
+      } else if (match && (!(existingWork || binding.codex?.observed) || match.thread)) {
+        const evidence = 'evidence' in match ? match.evidence : undefined
+        const contentObservation = existingWork || !!evidence || !!binding.codex?.observed
+        const observeExisting = contentObservation
+          || (match.thread?.status === 'idle' && await desktop.status(match.thread.id, this.signal()) === 'idle')
+        if (!this.authorized(ticketId, assignment.id, inputs.revision)) throw new Later('The current work changed during Codex discovery')
+        binding.codex = { project: match.project, ...(evidence ? { evidence } : {}),
+          ...(contentObservation ? { observed: true } : {}),
+          ...(observeExisting && match.thread ? { threadId: match.thread.id, revision: inputs.revision } : {}) }
+      }
+      this.save(ticketId, binding)
+    }
+    if (!binding.codex && binding.lastResult?.assignmentId === assignment.id && binding.lastResult.revision === inputs.revision) {
       await this.followTask(ticket, assignment, binding, inputs)
       return
     }
+    if (!binding.codex && (desktop || pilot.codexHistory) && assignment.report?.state === 'blocked' && !attemptForAssignment && binding.taskUuid) {
+      throw new PollAgain('Waiting for new evidence of a matching Codex session', codexContentCheckInterval)
+    }
     if (!binding.taskUuid) {
-      if (!await this.selectedAgentAvailable(ticketId, binding, selected.agentId)) return
+      if (!binding.codex && !await this.selectedAgentAvailable(ticketId, binding, selected.agentId)) return
       const marker = key('hifox-task', ticketId)
       await this.write(ticket, assignment, binding, inputs, { kind: 'task', marker, since: this.now(),
         title: ticket.title, description: JSON.stringify({ ticketId, origin: inputs.initialClues[0]?.messageId }) })
       if (await this.syncTask(ticketId, binding)) return
+    }
+    if (binding.codex) {
+      await this.advanceCodex(ticket, assignment, binding, inputs)
+      return
     }
     await this.deliver(ticket, assignment, binding, inputs)
     let attempt = binding.attempts[assignment.id]

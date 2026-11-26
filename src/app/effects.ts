@@ -18,6 +18,8 @@ export interface EffectPayloads {
   /** Process a frozen Dreaming batch; the key is the batch ID. */
   dreaming: { batchId: string }
   /** Recurring OpenViking audit, writeback, and duplicate cleanup for this profile. */
+  /** Assess and apply one complementary memory merge, keyed by the input versions. */
+  'dreaming-merge': { id: string }
   'dreaming-maintenance': Record<string, never>
   /** Build an Eval's candidate card and relay it to the main Session; the key is the Eval ID. */
   assessment: { triggerId: string }

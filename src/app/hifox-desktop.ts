@@ -2,6 +2,7 @@
 import type { DeploymentConfig } from '../deployment.ts'
 import { executable } from '../deployment.ts'
 import { hiFoxCliGateway } from '../executor/hifox-cli.ts'
+import { localCodexHistory } from '../executor/codex-history.ts'
 import { hiFoxScope, type HiFoxPilot } from '../executor/hifox-port.ts'
 import { pilotCommand, type PilotCommand } from '../infra/pilot-cli.ts'
 import { DingTalkListener } from '../sources/dingtalk-listener.ts'
@@ -29,8 +30,10 @@ export async function desktopHiFox(config: DeploymentConfig, lifetime: AbortSign
   const scope = base.data
   const dws = { cli: dingTalkCli, profile: dwsProfile }
   const gateway = hiFoxCliGateway(command, hiFoxCli, scope)
+  const history = config.codexProjectPaths?.length ? localCodexHistory(config.codexProjectPaths) : undefined
   return { pilot: {
     scope, gateway,
+    ...(history ? { codexHistory: history } : {}),
     createDingTalkListener: receive => new DingTalkListener(dws, scope, command, gateway.verify, receive),
     readDingTalkContext: dingTalkRoutingContext(command, dws),
     sendDingTalk: dingTalkTerminalSender(command, dws, config.dingTalkConversationId?.trim() || undefined,

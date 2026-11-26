@@ -27,7 +27,7 @@ const isEligible = (agent: z.infer<typeof pilotAgent>, space: string) =>
 const session = z.object({ id, agentId: id, lastRunId: id.nullish().or(z.literal('')) })
 const taskState = z.object({ name: z.string().trim().min(1), category: z.string().trim().min(1) })
 const taskStateNames = { started: '进行中', completed: '已完成', canceled: '已取消' }
-const task = z.object({ id, spaceId: id, description: z.string().nullable().optional(), url: z.string().optional(),
+const task = z.object({ id, spaceId: id, title: z.string().nullish(), description: z.string().nullable().optional(), url: z.string().optional(),
   agentChatSessions: z.array(session).optional(), assigneeId: id.nullable().optional(),
   assignees: z.array(z.unknown()).optional(), delegate: z.unknown().optional(), status: taskState.optional() })
 const detail = z.object({ id, status: z.string(), agentId: id, chatSessionId: id.nullable().optional(),
@@ -198,6 +198,11 @@ export function hiFoxCliGateway(cmd: PilotCommand, cli: string, scope: HiFoxScop
     taskUrl: taskReceipt.shape.taskUrl.safeParse(card.url).data })
   return {
     verify, agents, taskStatus,
+    async taskContent(taskUuid, signal) {
+      const card = await readPilotTask(taskUuid, signal)
+      const description = card.description?.split('\n').slice(1).join('\n').trim() ?? ''
+      return [card.title?.slice(0, 200), description.startsWith('{"ticketId":') ? '' : description.slice(0, 4000)].filter(Boolean).join('\n')
+    },
     async setTaskStatus(taskUuid, target, signal) {
       await verifyWriteScope(signal)
       const current = await taskStatus(taskUuid, signal)

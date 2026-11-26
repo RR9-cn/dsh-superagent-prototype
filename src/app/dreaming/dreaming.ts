@@ -7,6 +7,7 @@ import { PollAgain, type Effects } from '../effects.ts'
 import type { Store } from '../store.ts'
 import { findMemoryDuplicates, type MemoryCleanupPort, type MemoryDuplicate, type MemorySnapshot } from './duplicates.ts'
 import { MemoryWriteError, type MemoryEdit, type MemoryPatch, type MemoryPort, type MemoryWriteCode } from './memory.ts'
+import { findMemoryMerges, mergedMemoryBody, supportsMerge, type MemoryMerge, type MemoryMergeDecision, type MemoryMergePort } from './merges.ts'
 const RULE_VERSION = 'dsh-agent-1'
 const TIMEOUT_MS = 3 * 60_000
 const MEMORY_EXCERPT_LIMIT = 2400
@@ -63,6 +64,7 @@ export interface DreamingAgentPort {
     submit: (value: unknown) => void): Promise<'waiting' | 'finished'>
   /** Returns false while a canceled attempt is still active. */
   cancel(sessionId: string): boolean
+  assessMerge?(input: { model: RoleModel | null; keep: MemorySnapshot; source: MemorySnapshot }): Promise<MemoryMergeDecision>
   matchMemory?(input: MemoryMatchInput): Promise<z.infer<typeof DreamingMemoryResult>['result']>
 }
 
@@ -78,6 +80,9 @@ const lastBulk = record<BulkResult>('dreaming-live-bulk')
 const duplicates = family<MemoryDuplicate>('dreaming-memory-duplicate:')
 type DuplicateScan = { ids: string[]; total: number; skipped: string[]; unavailable: string[] }
 const duplicateScan = record<DuplicateScan>('dreaming-memory-duplicate-scan')
+const merges = family<MemoryMerge>('dreaming-memory-merge:')
+const mergeScan = record<string[]>('dreaming-memory-merge-scan')
+const merging = (plan: MemoryMerge) => !['proposed', 'verified', 'blocked', 'skipped'].includes(plan.status)
 const DAILY = 24 * 60 * 60_000
 // 02:00 in Asia/Shanghai is 18:00 UTC on the preceding calendar day.
 const MAINTENANCE_UTC_OFFSET = 18 * 60 * 60_000
@@ -106,6 +111,7 @@ export class Dreaming {
   private readonly memoryWrites = new Set<string>()
   private readonly memoryMatches = new Set<string>()
   private readonly activeMemoryUris = new Set<string>()
+  private autoMergeEnabled = false
   private maintenanceEnabled = false
   private maintenanceCollecting = false
   constructor(private readonly store: Store, private readonly effects: Effects, private readonly agent: DreamingAgentPort,
@@ -142,9 +148,12 @@ export class Dreaming {
   view() {
     const scan = this.store.get(duplicateScan)
     const maintenance = this.store.get(maintenanceRun)
+    const mergeIds = this.store.get(mergeScan)
     return { mode: 'dsh' as const, pack: this.evidence(), batches: this.list(), published: this.current(), bulk: this.store.get(lastBulk) ?? null,
       ...(scan ? { duplicates: { ...scan, pairs: this.duplicatePairs().filter(pair =>
         scan.ids.includes(pair.id) || ['deleting', 'pending_verification', 'verified'].includes(pair.status)) } } : {}),
+      ...(mergeIds ? { merges: this.mergePlans().filter(plan => mergeIds.includes(plan.id) || plan.status !== 'proposed')
+        .map(({ id, keep, source, status, decision }) => ({ id, keep, source, status, ...(decision ? { reason: decision.reason } : {}) })) } : {}),
       ...(this.maintenanceEnabled ? { maintenance: { active: this.maintenanceCollecting || (!!maintenance && !maintenance.finishedAt),
         revised: maintenance?.revised ?? 0, removed: maintenance?.removed ?? 0, unresolved: maintenance?.unresolved ?? 0,
         nextAt: maintenance && !maintenance.finishedAt ? undefined : new Date(this.maintenanceDue(maintenance)).toISOString() } } : {}) }
@@ -161,10 +170,22 @@ export class Dreaming {
     })
   }
 
-  enableMaintenance(memory: MemoryPort & MemoryCleanupPort,
+  enableMaintenance(memory: MemoryPort & MemoryMergePort,
     collect: () => Promise<Parameters<Dreaming['startAll']>[0]>, paused: () => boolean, now = Date.now): void {
     if (this.store.get(firstMaintenanceAt) === undefined) this.store.set(firstMaintenanceAt, nextDreamingMaintenanceAt(now()))
     this.maintenanceEnabled = true
+    if (this.agent.assessMerge) {
+      this.autoMergeEnabled = true
+      this.effects.handle('dreaming-merge', async ({ id }) => {
+        const plan = this.store.get(merges(id))
+        if (!plan || !this.canRunMerge(plan)) return
+        const { status } = await this.mergeMemories(id, memory, paused)
+        if (['writing', 'waiting_for_recall', 'removing', 'checking_removal'].includes(status)) {
+          throw new PollAgain('Waiting for OpenViking merge verification', 60_000)
+        }
+      }, { retry: [30_000, 15 * 60_000] })
+      this.enqueueMerges()
+    }
     this.effects.handle('dreaming-maintenance', async () => {
       if (this.lifetime.aborted || paused()) throw new PollAgain('Dreaming maintenance is paused', 60_000)
       let run = this.store.get(maintenanceRun)
@@ -239,8 +260,118 @@ export class Dreaming {
       }
       const result = { ...coverage, ids: pairs.map(pair => pair.id) }
       this.store.set(duplicateScan, result)
+      const excluded = new Set(pairs.flatMap(pair => [pair.keep.uri, pair.remove.uri]))
+      for (const plan of this.mergePlans().filter(merging)) {
+        excluded.add(plan.keep.uri)
+        excluded.add(plan.source.uri)
+      }
+      const candidates = findMemoryMerges(targets, excluded)
+      for (const plan of candidates) {
+        if (!this.store.get(merges(plan.id))) this.store.set(merges(plan.id), plan)
+      }
+      this.store.set(mergeScan, candidates.map(plan => plan.id))
+      this.enqueueMerges()
       return result
     })
+  }
+
+  private mergePlans(): MemoryMerge[] {
+    return this.store.keys(merges).flatMap(name => {
+      const plan = this.store.get(merges(name.slice(merges.prefix.length)))
+      return plan ? [plan] : []
+    })
+  }
+
+  private mergeUses(uri: string): boolean {
+    return this.mergePlans().some(plan => merging(plan) && (plan.keep.uri === uri || plan.source.uri === uri))
+  }
+
+  private canRunMerge(plan: MemoryMerge): boolean {
+    return merging(plan) || (plan.status === 'proposed' && this.store.get(mergeScan)?.includes(plan.id) === true)
+  }
+
+  private enqueueMerges(): void {
+    if (!this.autoMergeEnabled) return
+    for (const plan of this.mergePlans().filter(plan => this.canRunMerge(plan))) {
+      if (!this.effects.pending('dreaming-merge', plan.id)) this.effects.enqueue('dreaming-merge', plan.id, { id: plan.id })
+    }
+  }
+
+  private async mergeMemories(id: string, memory: MemoryMergePort, paused: () => boolean): Promise<{ status: MemoryMerge['status'] }> {
+    const saved = this.store.get(merges(id))
+    if (!saved) throw new DreamingBatchMissing('Dreaming merge not found')
+    let plan = saved
+    if (!this.canRunMerge(plan)) return { status: plan.status }
+    const ensureRunning = () => {
+      this.lifetime.throwIfAborted()
+      if (paused()) throw new PollAgain('Dreaming merge is paused', 60_000)
+    }
+    ensureRunning()
+    const { keep, source } = plan
+    const uris = [keep.uri, source.uri]
+    if (uris.some(uri => this.activeMemoryUris.has(uri) || (plan.status === 'proposed' && this.mergeUses(uri)))) {
+      throw new DreamingConflict('One of these memories is in use')
+    }
+    uris.forEach(uri => this.activeMemoryUris.add(uri))
+    const save = (status: MemoryMerge['status'], edit = plan.edit) => {
+      plan = { ...plan, status, edit }
+      this.store.set(merges(id), plan)
+      return { status }
+    }
+    const read = () => Promise.all([memory.readForDeletion(keep.uri), memory.readForDeletion(source.uri)])
+    try {
+      const [current, old] = await read()
+      const removing = plan.status === 'removing' || plan.status === 'checking_removal'
+      if (!current || (old ? old.digest !== source.digest : !removing)) return save('blocked')
+
+      if (!plan.edit && current.digest !== keep.digest) return save('blocked')
+      if (!plan.decision && !removing) {
+        const decision = await this.agent.assessMerge?.({ keep, source, model: this.store.settings().eval.model })
+        ensureRunning()
+        if (!decision) return save('blocked')
+        if (!this.canRunMerge(plan)) return save('skipped')
+        if (decision.outcome === 'skip' || !supportsMerge(plan, decision)) {
+          plan = { ...plan, decision: decision.outcome === 'skip' ? decision :
+            { outcome: 'skip', reason: '模型返回的互补内容无法在两条原记忆中核对。' } }
+          return save('skipped')
+        }
+        plan = { ...plan, decision, queries: [plan.queries[0]!, decision.sourcePassage.slice(0, 500)] }
+        const [retained, absorbed] = await read()
+        if (retained?.digest !== current.digest || absorbed?.digest !== source.digest) return save('blocked')
+        save(plan.status)
+      }
+
+      if (!plan.edit) {
+        const staged = await memory.prepare({ uri: keep.uri, previous: keep.content, replacement: mergedMemoryBody(plan),
+          digest: keep.digest, digestKind: 'visible', query: plan.queries[0]!, supplement: true })
+        ensureRunning()
+        save('writing', staged)
+      }
+      const edit = plan.edit!
+      if (current.digest !== edit.updatedDigest) {
+        if (plan.status !== 'writing' || current.digest !== keep.digest) return save('blocked')
+        ensureRunning()
+        await memory.apply(edit)
+      }
+      if (!removing) save('waiting_for_recall')
+      if (old && plan.status !== 'checking_removal') {
+        if (!await memory.recallsMerge(plan, false)) return { status: plan.status }
+        // Recheck both approved versions after waiting on the search index.
+        const [retained, absorbed] = await read()
+        if (retained?.digest !== edit.updatedDigest || absorbed?.digest !== source.digest) return save('blocked')
+        ensureRunning()
+        save('removing')
+        await memory.deleteExact(source.uri)
+      }
+      save('checking_removal')
+      const [retained, absorbed] = await read()
+      if (retained?.digest !== edit.updatedDigest || (absorbed && absorbed.digest !== source.digest)) return save('blocked')
+      if (!absorbed && await memory.recallsMerge(plan, true)) return save('verified')
+      return { status: 'checking_removal' }
+    } catch (error) {
+      if (error instanceof MemoryWriteError && error.status !== 'pending_verification') return save('blocked')
+      throw error
+    } finally { uris.forEach(uri => this.activeMemoryUris.delete(uri)) }
   }
 
   async removeDuplicate(id: string, memory: MemoryCleanupPort): Promise<{ status: MemoryDuplicate['status'] }> {
@@ -251,7 +382,7 @@ export class Dreaming {
       throw new DreamingConflict('Scan for duplicates again before confirming deletion')
     }
     const uris = [pair.keep.uri, pair.remove.uri]
-    if (uris.some(uri => this.activeMemoryUris.has(uri))) throw new DreamingConflict('One of these memories is in use')
+    if (uris.some(uri => this.activeMemoryUris.has(uri) || this.mergeUses(uri))) throw new DreamingConflict('One of these memories is in use')
     uris.forEach(uri => this.activeMemoryUris.add(uri))
     const save = (status: MemoryDuplicate['status']) => {
       this.store.set(duplicates(id), { ...pair, status })
@@ -534,7 +665,7 @@ export class Dreaming {
     if (edit.status === 'verified') return { uri: edit.uri, status: 'verified' }
     if (edit.errorCode === 'redirected_uri') throw new DreamingConflict('OpenViking reported a different write destination. Check the original URI before retrying')
     if (edit.status === 'conflict') throw new DreamingConflict('Reload the original memory and approve the correction again')
-    if (this.memoryWrites.has(id) || this.activeMemoryUris.has(edit.uri)) throw new DreamingConflict('This OpenViking writeback is already in progress')
+    if (this.memoryWrites.has(id) || this.activeMemoryUris.has(edit.uri) || this.mergeUses(edit.uri)) throw new DreamingConflict('This OpenViking writeback is already in progress')
     this.memoryWrites.add(id)
     this.activeMemoryUris.add(edit.uri)
     const save = (status: MemoryEdit['status'], error?: MemoryWriteError) => {

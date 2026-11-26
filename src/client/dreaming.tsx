@@ -11,6 +11,8 @@ type Batch = DreamingView['batches'][number]
 type Evidence = Batch['pack']['evidence'][number]
 type Duplicate = NonNullable<DreamingView['duplicates']>['pairs'][number]
 
+type Merge = NonNullable<DreamingView['merges']>[number]
+
 function EvidenceList({ items }: { items: Evidence[] }) {
   return <ul className="dt-list">{items.map(item => <li className="dt-row" key={item.id}>
     <details><summary>{item.source}</summary><p>{item.text}</p></details>
@@ -125,6 +127,21 @@ function DuplicateReview({ pair, reload }: { pair: Duplicate; reload: () => Prom
   </li>
 }
 
+function MergeReview({ plan }: { plan: Merge }) {
+  const { t } = usePanel()
+  return <li className="dt-row">
+    <details>
+      <summary>{plan.keep.uri.split('/').at(-1)} · {t(`dreaming.mergeStatus.${plan.status}`)}</summary>
+      <KeyValues rows={[[t('dreaming.duplicateKeep'), plan.keep.uri], [t('dreaming.mergeSource'), plan.source.uri]]} />
+      {[plan.keep, plan.source].map(entry => <details key={entry.uri}>
+        <summary>{entry.uri.split('/').at(-1)}</summary>
+        <div style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{entry.content}</div>
+      </details>)}
+      {plan.reason && <Hint>{plan.reason}</Hint>}
+    </details>
+  </li>
+}
+
 function BatchReview({ batch, reload, openViking }: { batch: Batch; reload: () => Promise<void>; openViking?: true }) {
   const { t, call, openSession, notify } = usePanel()
   const action = useAction(async (review: 'approved' | 'rejected' | 'pending' | 'publish') => {
@@ -232,7 +249,7 @@ export function DreamingPage() {
     notify(t('copied'))
   })
   if (!data) return error ? <p className="dt-error" role="alert">{error.message}</p> : <Hint>{t('loading')}</Hint>
-  const { canStart, batches, published, openViking, bulk, pack, duplicates, maintenance } = data
+  const { canStart, batches, published, openViking, bulk, pack, duplicates, merges, maintenance } = data
   const working = batches.some(batch => batch.status === 'queued' || batch.status === 'running')
   const results = batches.filter(batch => !batch.pack.archiveUri)
   const historical = batches.filter(batch => batch.pack.archiveUri)
@@ -265,12 +282,16 @@ export function DreamingPage() {
         <EvidenceList items={pack.evidence} />
       </> : !openViking && <Hint>{t('dreaming.noEvidence')}</Hint>}
     </Section>
-    {openViking && <Section title={t('dreaming.duplicateTitle')} action={<Button size="sm" disabled={!canStart || maintenance?.active || scan.busy || start.busy}
-      onClick={() => { void scan.run() }}>{t('dreaming.duplicateScan')}</Button>}>
+    {openViking && <Section title={t('dreaming.memoryCleanupTitle')} action={<Button size="sm" disabled={!canStart || maintenance?.active || scan.busy || start.busy}
+      onClick={() => { void scan.run() }}>{t('dreaming.memoryCleanupScan')}</Button>}>
       {scan.busy ? <Hint>{t('dreaming.duplicateScanning')}</Hint> : duplicates && <Hint>{t('dreaming.duplicateCoverage', {
         total: duplicates.total, skipped: duplicates.skipped.length, unavailable: duplicates.unavailable.length })}</Hint>}
       {duplicates && (duplicates.pairs.length ? <ul className="dt-list">{duplicates.pairs.map(pair =>
         <DuplicateReview key={pair.id} pair={pair} reload={reload} />)}</ul> : <Hint>{t('dreaming.duplicateEmpty')}</Hint>)}
+      {merges && <details><summary>{t('dreaming.mergeResults', { count: merges.length })}</summary>
+        {merges.length ? <ul className="dt-list">{merges.map(plan =>
+          <MergeReview key={plan.id} plan={plan} />)}</ul> : <Hint>{t('dreaming.mergeEmpty')}</Hint>}
+      </details>}
     </Section>}
     {results.length > 0 && <details>
       <summary>{t('dreaming.auditResults', { count: results.length })}</summary>

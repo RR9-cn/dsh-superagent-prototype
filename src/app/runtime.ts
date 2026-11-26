@@ -164,6 +164,8 @@ export class Runtime extends Service implements SourceHost {
         }
         const pilot = { scope: hiFoxScope.parse(hiFoxPilot.scope), gateway,
           ...(reconcileMs === undefined ? {} : { reconcileMs }),
+          ...(hiFoxPilot.codexDesktop ? { codexDesktop: hiFoxPilot.codexDesktop } : {}),
+          ...(hiFoxPilot.codexHistory ? { codexHistory: hiFoxPilot.codexHistory } : {}),
           sendDingTalk: hiFoxPilot.sendDingTalk.bind(hiFoxPilot) }
         this.hiFoxScope = pilot.scope
         this.hiFoxAgents = gateway.agents.bind(gateway)

@@ -11,6 +11,7 @@ import { Hint, KeyValues, Section } from './widgets.tsx'
 const DEFAULTS = {
   hiFoxEnabled: false,
   hiFoxSpace: '',
+  codexProjectPaths: '',
   dingTalkProfile: '',
   dingTalkRepliesEnabled: false,
   hiFoxCli: 'hifox',
@@ -23,6 +24,7 @@ type ConfigOp = Parameters<NonNullable<DeploymentForm>['mutate']>[0][number]
 const keys = Object.keys(DEFAULTS) as ConfigKey[]
 const fieldsOf = (value: Record<string, unknown>): HiFoxConfigFields => Object.fromEntries(keys.map(key => {
   const saved = value[key]
+  if (key === 'codexProjectPaths') return [key, Array.isArray(saved) ? saved.join('\n') : '']
   return [key, typeof saved === typeof DEFAULTS[key] ? saved : DEFAULTS[key]]
 })) as HiFoxConfigFields
 
@@ -40,7 +42,7 @@ export function HiFoxSettings({ form }: { form: DeploymentForm }) {
         const input = value[key]
         const field = typeof input === 'string' ? input.trim() : input
         return field === base[key] ? [] : field === '' ? [{ op: 'unset', path: [key] }]
-          : [{ op: 'set', path: [key], value: field }]
+          : [{ op: 'set', path: [key], value: key === 'codexProjectPaths' ? String(field).split('\n').map(path => path.trim()).filter(Boolean) : field }]
       })
       if (!form || !await form.mutate(ops, revision)) throw new Error(t('deploymentRefused'))
       notify(t('savedRestarting'))
@@ -64,6 +66,12 @@ export function HiFoxSettings({ form }: { form: DeploymentForm }) {
       <Section title={t('settingsGroup.hifox')}>
         {toggle('hiFoxEnabled', t('hifoxEnableHint'))}
         {field('hiFoxSpace')}
+      </Section>
+      <Section title="Codex">
+        <Field label={t('hifoxConfig.codexProjectPaths')}>
+          <textarea className="dt-textarea dt-mono" rows={3} spellCheck={false} value={draft.value.codexProjectPaths}
+            onChange={event => draft.edit({ ...draft.value, codexProjectPaths: event.target.value })} />
+        </Field>
       </Section>
       <Section title={t('hifoxDingTalk')}>
         {field('dingTalkProfile', true)}
