@@ -33,6 +33,10 @@ import { Store } from './store.ts'
 import { evalsHealth } from './views/overview.ts'
 import { TextCache } from './cache.ts'
 import { Effects, Later } from './effects.ts'
+import { Dreaming } from './dreaming/dreaming.ts'
+import { DreamingAgent } from './dreaming/agent.ts'
+import { collectOpenVikingAudit } from './dreaming/audit.ts'
+import { openVikingMemory } from './dreaming/memory.ts'
 import { Prompts } from './prompts.ts'
 import { registerHttp, type HttpHost } from './http.ts'
 import type { LinkTarget } from './views/records.ts'
@@ -66,6 +70,8 @@ export class Runtime extends Service implements SourceHost {
   readonly setup: Setup
   readonly prompts: Prompts
   readonly effects: Effects
+  readonly dreaming: Dreaming
+  private readonly dreamingAgent: DreamingAgent
   readonly sources: SourceRegistry
   readonly commands: Commands
   readonly sessions: Sessions
@@ -120,6 +126,8 @@ export class Runtime extends Service implements SourceHost {
       const commands = this.commands = new Commands(() => setup.deployment, setup.commandEnvironment, this.lifetime)
       const board = this.board
       const effects = this.effects = new Effects(store, board)
+      this.dreamingAgent = new DreamingAgent(ctx, machine.stateDir, this.lifetime)
+      this.dreaming = new Dreaming(store, effects, this.dreamingAgent, this.lifetime)
       const sources = this.sources = new SourceRegistry(() => store.settings(), board, kind => {
         // Sync source member lists once startup completes when a source plugin loads dynamically.
         if (kind.policy?.sync) void this.ready?.then(() => this.settings.syncable().includes(kind.kind) ? this.settings.sync(kind.kind) : undefined)
@@ -307,6 +315,7 @@ export class Runtime extends Service implements SourceHost {
       return
     }
     this.sessions.install()
+    this.dreamingAgent.install()
     this.executor.install()
     await this.sessions.ensure(this.masterId, this.machine.stateDir, 'dsh-superagent orchestrator', 'orchestrator')
     for (const id of this.settings.syncable()) await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })
@@ -321,6 +330,13 @@ export class Runtime extends Service implements SourceHost {
     try { retireSources(this.store, this.engine, this.effects) } finally { this.quiet-- }
     this.executor.resume()
     this.hiFox?.resume()
+    const dreaming = this.machine.dreamingOpenViking
+    if (dreaming?.automatic) {
+      this.dreaming.enableMaintenance(openVikingMemory(dreaming.cli, this.lifetime), () => {
+        const signal = AbortSignal.any([this.lifetime, AbortSignal.timeout(180_000)])
+        return collectOpenVikingAudit(dreaming.cli, openVikingMemory(dreaming.cli, signal).snapshot, signal)
+      }, () => this.paused() || this.closing())
+    }
     this.passes.start()
     this.effects.start()
     this.runtimeHealth.set({ state: 'ready', detail: 'Orchestrator is ready', at: now() })
@@ -350,6 +366,7 @@ export class Runtime extends Service implements SourceHost {
     const runtime = this
     const { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks, setup, passes } = this
     return { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks,
+      dreaming: this.dreaming, lifetime: this.lifetime,
       get deployment() { return setup.deployment },
       hiFoxStatus: () => runtime.hiFoxStatus(),
       hiFoxAgentRoster: async () => ({ agents: runtime.hiFoxScope ? (await runtime.liveHiFoxRoster()).agents : [] }),
@@ -373,6 +390,7 @@ export class Runtime extends Service implements SourceHost {
       const agents = ids.map(id => this.ctx.agents.get(id as SessionId)).filter((agent): agent is Agent => agent !== undefined)
       for (const agent of agents) agent.cancel({ kind: 'user' }, { keepInbox: true })
       await Promise.allSettled([passes, this.effects.drain(), ...agents.map(agent => agent.whenIdle())])
+      await this.dreamingAgent.shutdown()
       // The workers' jobs and subagents stop too: their ends would start worker turns without the tool limits released below.
       await this.executor.shutdown()
       this.executor.dispose()

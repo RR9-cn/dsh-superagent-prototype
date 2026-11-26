@@ -10,6 +10,9 @@ import type { DecisionListView, SearchView, ThreadDetailView, ThreadListView } f
 import type { TicketListView } from './views/tickets.ts'
 import type { DingTalkListenerStatus } from '../sources/dingtalk-listener.ts'
 import type { HiFoxAgent } from '../executor/hifox-port.ts'
+import type { Dreaming, DreamingReview } from './dreaming/dreaming.ts'
+import type { listOpenVikingArchives } from './dreaming/openviking.ts'
+import type { MemoryPatch, MemoryPort } from './dreaming/memory.ts'
 
 export const TICKET_FILTERS = ['open', 'person', 'working', 'idle', 'ended'] as const
 export const THREAD_FILTERS = ['subscribed', 'evaluating', 'recent', 'all'] as const
@@ -20,6 +23,18 @@ interface Paged { offset?: number; limit?: number }
 type Delivery = 'injected' | 'pending'
 
 export interface Api {
+  'GET dreaming': { response: ReturnType<Dreaming['view']> & { canStart: boolean; openViking?: true } }
+  'GET dreaming/archives': { response: Awaited<ReturnType<typeof listOpenVikingArchives>> }
+  'POST dreaming/duplicates/scan': { response: ReturnType<Dreaming['scanDuplicates']> }
+  'POST dreaming/duplicates/:id/remove': { response: Awaited<ReturnType<Dreaming['removeDuplicate']>> }
+  'POST dreaming/batches': { response: ReturnType<Dreaming['start']> | ReturnType<Dreaming['startAll']> }
+  'PUT dreaming/batches/:id/review': { body: { review: DreamingReview }; response: ReturnType<Dreaming['review']> }
+  'POST dreaming/batches/:id/publish': { response: ReturnType<Dreaming['publish']> }
+  'POST dreaming/batches/:id/memory/find': { body: { query: string }; response: Awaited<ReturnType<MemoryPort['find']>> }
+  'POST dreaming/batches/:id/memory/read': { body: { uri: string }; response: Awaited<ReturnType<MemoryPort['preview']>> }
+  'PUT dreaming/batches/:id/memory': { body: MemoryPatch; response: Awaited<ReturnType<Dreaming['stageMemory']>> }
+  'POST dreaming/batches/:id/memory/write': { response: Awaited<ReturnType<Dreaming['updateMemory']>> }
+  'POST dreaming/batches/:id/memory/correct': { response: Awaited<ReturnType<Dreaming['correctMemory']>> }
   'GET state': { response: StateView }
   'GET hifox/listener': { response: DingTalkListenerStatus }
   'GET hifox/agents': { response: { agents: HiFoxAgent[] } }

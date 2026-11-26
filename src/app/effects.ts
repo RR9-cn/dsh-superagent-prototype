@@ -15,6 +15,10 @@ import type { HealthBoard, HealthEntry } from '../infra/health.ts'
 import type { Store } from './store.ts'
 
 export interface EffectPayloads {
+  /** Process a frozen Dreaming batch; the key is the batch ID. */
+  dreaming: { batchId: string }
+  /** Recurring OpenViking audit, writeback, and duplicate cleanup for this profile. */
+  'dreaming-maintenance': Record<string, never>
   /** Build an Eval's candidate card and relay it to the main Session; the key is the Eval ID. */
   assessment: { triggerId: string }
   /** Launch a pending Assignment; the key is the Assignment ID. */

@@ -74,6 +74,8 @@ Copy [examples/profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) t
 | Key | Required | Meaning |
 | --- | --- | --- |
 | `repositoryPath` | no | Absolute path to a local Git worktree whose committed HEAD can be read during admission. |
+| `dreamingOpenVikingCli` | no | Absolute path to the `ov` command used to list OpenViking memories and read archived evidence for Dreaming. The CLI uses its current OpenViking user identity. |
+| `dreamingAutoMaintenance` | no | Defaults to false. When enabled with the Dreaming OpenViking CLI, DSH runs at 02:00 Beijing time every day. If DSH was closed at the scheduled time, it catches up once on startup. It applies eligible corrections and removes verified duplicate entries using the configured identity. |
 | `stateDir` | yes | Absolute path: the database, the lock, the command shims in `worker-bin`, the agent's git configuration and, by default, the Ticket directories in `work`. Back it up before upgrades |
 | `promptMaxChars`, `admissionContextMaxPages`, `admissionContextTimeoutMs` | no | The largest saved prompt configuration, and how many Thread pages one assessment reads within what time |
 

@@ -30,9 +30,15 @@ import { settingsView } from './views/settings.ts'
 import { sourcesStatus, type SetupState } from './views/sources.ts'
 import { decisionList, search, threadDetail, threadList } from './views/threads.ts'
 import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
+import { DreamingBatchMissing, DreamingConflict, type Dreaming } from './dreaming/dreaming.ts'
+import { listOpenVikingArchives } from './dreaming/openviking.ts'
+import { collectOpenVikingAudit, collectOpenVikingMemories } from './dreaming/audit.ts'
+import { MemoryWriteError, memoryPatch, memoryUri, openVikingMemory } from './dreaming/memory.ts'
 
 export interface HttpHost {
   readonly store: Store
+  readonly dreaming: Dreaming
+  readonly lifetime?: AbortSignal
   /** Feishu message links resolved since startup, used by search to match AppLink URLs. */
   readonly sourceLinks: Pick<TextCache, 'entries'>
   readonly sources: SourceRegistry
@@ -95,8 +101,10 @@ function failure(error: unknown): [number, Record<string, unknown>] {
   }
   if (error instanceof SetupError) return [400, { error: error.message, setup: error.problem }]
   if (error instanceof RouteError) return [error.status, { error: error.message }]
+  if (error instanceof DreamingBatchMissing) return [404, { error: error.message }]
+  if (error instanceof MemoryWriteError) return [error.status === 'blocked' ? 403 : 409, { error: error.message, status: error.status }]
   if (error instanceof UserError) return [error.missing ? 404 : 400, { error: error.message, code: error.code, values: error.values }]
-  if (error instanceof SettingsConflict || error instanceof PromptConflict) return [409, { error: error.message }]
+  if (error instanceof SettingsConflict || error instanceof PromptConflict || error instanceof DreamingConflict) return [409, { error: error.message }]
   return [500, { error: error instanceof Error ? error.message : String(error) }]
 }
 
@@ -163,7 +171,64 @@ function routes(runtime: HttpHost): Routes {
   const { store } = runtime
   const ticket = (id: string) => { if (!store.tickets.get(id)) throw new RouteError(404, 'Ticket not found'); return id }
   const promptBody = (input: { body: (maxBytes?: number) => Promise<unknown> }) => input.body(4 * runtime.machine.promptMaxChars.get() + 4096)
+  let preparingDreaming: Promise<ApiResponse<'POST dreaming/batches'>> | undefined
+  let scanningDuplicates: Promise<ApiResponse<'POST dreaming/duplicates/scan'>> | undefined
+  const memory = (signal = runtime.lifetime ?? new AbortController().signal) => {
+    const source = runtime.machine?.dreamingOpenViking
+    if (!source) throw new DreamingConflict('The OpenViking memory connection is not configured')
+    return openVikingMemory(source.cli, signal)
+  }
   return {
+    'GET dreaming': () => {
+      const view = runtime.dreaming.view()
+      const source = runtime.machine?.dreamingOpenViking
+      return { ...view, canStart: runtime.configured() && (view.pack !== null || !!source),
+        ...(source ? { openViking: true as const } : {}) }
+    },
+    'GET dreaming/archives': async () => {
+      const source = runtime.machine?.dreamingOpenViking
+      if (!source) throw new DreamingConflict('The OpenViking evidence source is not configured')
+      try { return await listOpenVikingArchives(source.cli, AbortSignal.timeout(45_000)) }
+      catch { throw new DreamingConflict('Unable to list the OpenViking archives') }
+    },
+    'POST dreaming/duplicates/scan': () => {
+      if (!runtime.configured()) throw new DreamingConflict('Complete the local DSH setup before scanning memories')
+      const source = runtime.machine?.dreamingOpenViking
+      if (!source) throw new DreamingConflict('The OpenViking memory connection is not configured')
+      const signal = AbortSignal.any([AbortSignal.timeout(180_000), ...(runtime.lifetime ? [runtime.lifetime] : [])])
+      return scanningDuplicates ??= collectOpenVikingMemories(source.cli, memory(signal).snapshot, signal)
+        .then(result => { signal.throwIfAborted(); return runtime.dreaming.scanDuplicates(result) })
+        .finally(() => { scanningDuplicates = undefined })
+    },
+    'POST dreaming/duplicates/:id/remove': ({ params }) => runtime.dreaming.removeDuplicate(params.id, memory()),
+    'POST dreaming/batches': () => {
+      if (!runtime.configured()) throw new DreamingConflict('Complete the local DSH setup before starting a Dreaming batch')
+      const source = runtime.machine?.dreamingOpenViking
+      if (!source) return runtime.dreaming.start()
+      const signal = AbortSignal.any([AbortSignal.timeout(180_000), ...(runtime.lifetime ? [runtime.lifetime] : [])])
+      return preparingDreaming ??= collectOpenVikingAudit(source.cli, memory(signal).snapshot, signal).then(result => {
+        signal.throwIfAborted()
+        return runtime.dreaming.startAll(result)
+      }, () => { throw new DreamingConflict('Unable to prepare OpenViking memories and archive evidence for Dreaming') })
+        .finally(() => { preparingDreaming = undefined })
+    },
+    'PUT dreaming/batches/:id/review': async ({ params, body }) => runtime.dreaming.review(params.id,
+      z.object({ review: z.enum(['approved', 'rejected', 'pending']) }).strict().parse(await body(1024)).review),
+    'POST dreaming/batches/:id/publish': ({ params }) => runtime.dreaming.publish(params.id),
+    'POST dreaming/batches/:id/memory/find': async ({ params, body }) => {
+      const context = runtime.dreaming.memoryContext(params.id)
+      const { query } = z.object({ query: z.string().trim().min(1).max(500) }).strict().parse(await body(4096))
+      return memory().find(query, context.project)
+    },
+    'POST dreaming/batches/:id/memory/read': async ({ params, body }) => {
+      const { uri } = z.object({ uri: memoryUri }).strict().parse(await body(4096))
+      runtime.dreaming.memoryContext(params.id, uri)
+      return memory().preview(uri)
+    },
+    'PUT dreaming/batches/:id/memory': async ({ params, body }) => runtime.dreaming.stageMemory(params.id,
+      memoryPatch.parse(await body(110_000)), memory()),
+    'POST dreaming/batches/:id/memory/write': ({ params }) => runtime.dreaming.updateMemory(params.id, memory()),
+    'POST dreaming/batches/:id/memory/correct': ({ params }) => runtime.dreaming.correctMemory(params.id, memory()),
     'GET state': () => stateView(runtime),
     'GET overview': () => overview(views(runtime), runtime.health, policyVersion(store.settings()),
       executorLoad(store, runtime.executor.activeCount()), runtime.setupProblem ?? runtime.feishuProblem),

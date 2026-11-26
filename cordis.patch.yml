@@ -189,3 +189,11 @@
                   thresholdChars: 8192
                   headChars: 4096
                   tailChars: 1024
+    - id: dsh-superagent-dreaming-preset
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: dsh-superagent-dreaming
+        name: dsh-superagent Dreaming
+        description: Dreaming 整理会话专用。
+        order: 92
+        plugins: []

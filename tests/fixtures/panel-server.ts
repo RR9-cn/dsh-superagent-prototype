@@ -83,6 +83,8 @@ export const MACHINE: SetupView['machine'] = { stateDir: '/srv/dsh-superagent', 
 
 type Settings = ReturnType<typeof SettingsSchema.parse>
 export interface PanelServer {
+  dreaming?: ApiResponse<'GET dreaming'>
+  dreamingMemoryMatches?: ApiResponse<'POST dreaming/batches/:id/memory/find'>
   joined?: Record<string, string>; joining?: Record<string, string>
   joinError?: string
   settings: Settings; revisions: Record<string, number>
@@ -294,6 +296,23 @@ function changeListener(state: 'stopped' | 'listening') {
   return listener
 }
 const ROUTES: { [K in keyof Api]: Route<K> } = {
+  'GET dreaming': { answer: () => server.dreaming ?? { mode: 'dsh', canStart: false, pack: null, batches: [], published: null, bulk: null } },
+  'GET dreaming/archives': { answer: () => ({ sessions: 0, archives: [], unavailable: [] }) },
+  'POST dreaming/duplicates/scan': { answer: () => ({ ids: [], total: 0, skipped: [], unavailable: [] }) },
+  'POST dreaming/duplicates/:id/remove': { answer: ({ params: { id } }) => {
+    const pair = server.dreaming?.duplicates?.pairs.find(item => item.id === id)
+    if (!pair) return refuse(404, 'Duplicate not found')
+    pair.status = 'verified'
+    return { status: 'verified' }
+  } },
+  'POST dreaming/batches': { answer: () => refuse(409, 'Dreaming setup is incomplete') },
+  'PUT dreaming/batches/:id/review': { body: true, answer: () => refuse(404, 'Dreaming batch not found') },
+  'POST dreaming/batches/:id/publish': { answer: () => refuse(404, 'Dreaming batch not found') },
+  'POST dreaming/batches/:id/memory/find': { body: true, answer: () => server.dreamingMemoryMatches ?? [] },
+  'POST dreaming/batches/:id/memory/read': { body: true, answer: () => refuse(404, 'Dreaming batch not found') },
+  'PUT dreaming/batches/:id/memory': { body: true, answer: () => refuse(404, 'Dreaming batch not found') },
+  'POST dreaming/batches/:id/memory/write': { answer: () => refuse(404, 'Dreaming batch not found') },
+  'POST dreaming/batches/:id/memory/correct': { answer: () => ({ status: 'no_match' }) },
   'GET state': { answer: stateView },
   'GET hifox/listener': { answer: () => server.hifox.listener ?? { state: 'unavailable' } },
   'GET hifox/agents': { answer: () => ({ agents: [] }) },

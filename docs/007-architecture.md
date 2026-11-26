@@ -327,6 +327,12 @@ The app still has a few channel-specific integrations:
 | `src/app/skill-files.ts` | Packaged text: `promptFile`, which joins a file's one-sentence lines into paragraphs, and the bundled skills |
 | `src/app/sessions.ts` | Sessions |
 | `src/app/delivery.ts` | `AgentDelivery`: delivers a message to a DeepSeek Harness agent once per request id, also across a restored Session |
+| `src/app/dreaming/agent.ts` | Creates dedicated DSH Sessions and binds the Dreaming result tool |
+| `src/app/dreaming/audit.ts` | Reads current OpenViking memories and selects archive evidence for each original URI |
+| `src/app/dreaming/dreaming.ts` | Persists Dreaming batches, validated Agent proposals, reviews and local replay snapshots |
+| `src/app/dreaming/duplicates.ts` | Identifies identical memories and approved replacements with exact versions to retain and remove |
+| `src/app/dreaming/openviking.ts` | Reads bounded evidence from a manually selected completed OpenViking Codex archive |
+| `src/app/dreaming/memory.ts` | Stages exact OpenViking memory edits, performs guarded writes and verifies scoped retrieval |
 | `src/app/retry-health.ts` | `RetryHealth`: which Sessions wait on a model budget retry, for the `models` health entry |
 | `src/app/role-models.ts` | Resolves the Eval and Executor models, and seeds a new Session with its role's model |
 | `src/app/assessment.ts` | The MasterAssessor, the assessment schema and the window `orchestrator_eval` answers |
@@ -389,6 +395,7 @@ The app still has a few channel-specific integrations:
 | `src/client/prompts.tsx` | The Prompts settings: the page owns the view it read and its editor the draft, and the Edit, Full prompt and History tabs render from them; a built-in part's editor shows a changed default and keeps or drops the override |
 | `src/client/prompt-config.ts` | The prompt configuration by section, by the team sections, skill names, built-in parts (`part/<key>`, with `withOverride`) and part headings the prompt views give, and the line diff of the full prompt, as pure functions |
 | `src/client/deployment.tsx` | The Deployment settings, also shown in DeepSeek Harness's Plugin Manager |
+| `src/client/dreaming.tsx` | Runs and reviews Dreaming batches and copies published replay snapshots |
 | `src/client/draft.tsx` | Settings drafts: `draftReducer`, their states and their merge with a newer saved revision, `saveBarText`, the save bar's line, and the save bar |
 | `src/client/controls.tsx` | Local copies of DeepSeek Harness's controls, which follow its markup, keyboard behaviour and design tokens, since the bundle does not import `@deepseek-ai/dsh-client-ui-primitives`; they read no context |
 | `src/client/widgets.tsx` | The small components the pages share, which read the panel's context: sections, page heads, load states, times, links, confirmed actions, the setup check and Markdown |
@@ -413,6 +420,8 @@ The app still has a few channel-specific integrations:
 | `tests/feishu-read.spec.ts` | Bounded reads of Feishu conversations |
 | `tests/repository.spec.ts` | Reads committed files and directories from a local Git checkout |
 | `tests/desktop-hifox.spec.ts` | Standard desktop pilot prerequisites and CLI adapter, listener and reply behavior |
+| `tests/dreaming-openviking.spec.ts` | Archive completion, project peer validation, provenance and excerpt bounds |
+| `tests/dreaming-memory.spec.ts` | Exact memory edits, revision conflicts, indexed recall and safe retry after indexing delay |
 | `tests/commands.spec.ts` | CLI transport and command error handling |
 | `tests/admission-context.spec.ts`, `tests/feishu-image.spec.ts` | The Thread window of assessments, and Feishu image reads |
 | `tests/assessment.spec.ts` | What the MasterAssessor keeps per Eval, and when it lets go |

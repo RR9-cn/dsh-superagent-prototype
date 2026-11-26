@@ -15,6 +15,11 @@ const absolute = (description: string) => s.string().pattern(/^\//).description(
 export const Config = s.object({
   stateDir: absolute('Directory for the database, locks, worker shims, the agent\'s git configuration and, by default, the ticket directories.').required(),
   repositoryPath: absolute('Optional local Git worktree for read-only assessment context.'),
+  dreamingOpenVikingCli: absolute('OpenViking CLI for Dreaming archives.'),
+  dreamingAutoMaintenance: s.boolean().default(false).description('Authorize daily automatic Dreaming corrections and confirmed duplicate cleanup.'),
+  // Accept the retired single-project configuration when loading existing profiles.
+  dreamingProject: s.string(),
+  dreamingOpenVikingPeers: s.array(s.string()),
   hiFoxEnabled: s.boolean().default(false).description('Mount the scoped HiFox pilot.'),
   hiFoxCli: s.string().default('hifox'),
   hiFoxSpace: s.string(),
@@ -44,6 +49,7 @@ type HiFoxSettings = Pick<DeploymentConfig, 'hiFoxEnabled' | 'hiFoxCli' | 'hiFox
 export interface Machine {
   stateDir: string
   repositoryPath?: string
+  dreamingOpenViking?: { cli: string; automatic?: boolean }
   hiFoxSettings?: HiFoxSettings
   promptMaxChars: Volatile<number>
   admissionContextMaxPages: Volatile<number>
@@ -59,10 +65,11 @@ const MOVED: Record<string, string> = {
 export function machineOf(config: DeploymentConfig): Machine {
   const unknown = Object.keys(config).filter(key => !(key in (Config.dict ?? {})))
   if (unknown.length) throw new Error(`dsh-superagent configuration has keys it does not use: ${unknown.map(key => MOVED[key] ? `${key} (now ${MOVED[key]})` : key).join(', ')}; docs/006-deployment.md lists the keys`)
-  const { stateDir, repositoryPath, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs,
+  const { stateDir, repositoryPath, dreamingOpenVikingCli, dreamingAutoMaintenance, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs,
     hiFoxEnabled, hiFoxCli, hiFoxSpace, dingTalkCli, dingTalkProfile, dingTalkRepliesEnabled } = config
   const hiFoxSettings = { hiFoxEnabled, hiFoxCli, hiFoxSpace, dingTalkCli, dingTalkProfile, dingTalkRepliesEnabled }
   return { stateDir, ...(repositoryPath ? { repositoryPath } : {}), hiFoxSettings,
+    ...(dreamingOpenVikingCli ? { dreamingOpenViking: { cli: dreamingOpenVikingCli, automatic: dreamingAutoMaintenance } } : {}),
     promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs }
 }
 
