@@ -15,7 +15,7 @@ flowchart TB
   engine -->|Policy| policy[Policy]
   engine -->|SourceScope| registry[SourceRegistry]
   engine -->|Assessor| assessor[MasterAssessor]
-  engine -->|Executor| executor[DshExecutor]
+  engine -->|Executor| executor[HiFoxExecutor]
   assessor -->|decide| engine
   engine -->|Outbox| outbox[Outbox]
   executor -->|assignmentStarted, inputsDelivered, report| engine
@@ -30,7 +30,7 @@ flowchart TB
 
 `Runtime` is the composition root; it contains no domain rules. Its constructor locks the state directory, opens the Store and builds each component. If construction fails, it closes the Store and releases the lock.
 
-Startup registers management routes and runs Setup. After setup resolves, it installs Session and Executor hooks, ensures the main Session exists, starts Policy syncs, resumes interrupted Assignments, and starts passes and effects. `ready` marks completion of startup.
+Startup registers management routes and runs Setup. After setup resolves, it installs the main Session hooks, ensures the main Session exists, starts Policy syncs, restores pending HiFox work, and starts passes and effects. `ready` marks completion of startup.
 
 Shutdown cancels turns, waits for passes, effects and agents, restores the process environment, closes the Store and releases the lock. Source plugins inject Runtime as the `orchestrator` service through the narrow `SourceHost` interface.
 
@@ -114,7 +114,7 @@ Runtime turns `ticket.ended`, `trigger.requeued` and `thread.unsubscribed` into 
 
 The core's codes, such as `timeout`, `policyChanged`, `routed` and `startedTicket`, are `REASONS`, with the English that agents read through `reasonText`; a gate or a Source scope gives its own, such as `not_a_member`; and `said` carries words an assessor or a person wrote. The panel words each code by `reason.<code>`, and a Trigger a Source filtered records the Source's code the same way.
 
-A Ticket keeps each fact once. It is open while it has no `ended`, which records when, by whom, why and with what outcome it ended; what it last said is its latest Assignment Report (`latestReport`); and its Executor Session is named after it (`workerSessionId` in `src/executor/dsh.ts`).
+A Ticket keeps each fact once. It is open while it has no `ended`, which records when, by whom, why and with what outcome it ended; what it last said is its latest Assignment Report (`latestReport`); and its Executor Session is named after it (`workerSessionId` in `src/app/ticket-context.ts`).
 
 Its fields are typed: `origin`, the admissible Trigger that gave its Eval's batch its strength and the batch itself (`triggerId`, `triggerIds`); `execution`, what the Executor chose (`name`, `directory` and `assignment`); `delivery`, the last failed Input delivery (`error`, `at`), until a delivery succeeds, a new Assignment starts or the Ticket ends; and `follows`, the Threads a Source made it follow, each `{thread, own, closed?}`: `own` when the Ticket opened it, and `closed` with `at` and `outcome` once it closed. The Ticket domain writes `follows`. Existing follow records remain readable.
 
@@ -172,8 +172,7 @@ Failures retry with exponential backoff. Throwing `Later` defers work without co
 | Kind | Handler | Does | At once | Retry |
 | --- | --- | --- | --- | --- |
 | `assessment` | MasterAssessor | Steers an Eval's candidate card into the main Session's turn, then tells the Engine it was delivered, which starts the Eval's deadline | 4, none while paused | 2 s doubling to 60 s |
-| `launch` | DshExecutor | Launches a pending Assignment: prepare command, Executor Session, assignment message | The free worker slots, none while paused | A passing failure of the model provider or the network runs again after 5 s doubling to 300 s, three times; any other failure, and a failed prepare command, fails its Ticket. One held by a pause or by full worker slots tries again after 5 s |
-| `delivery` | DshExecutor | Hands a Ticket's waiting Inputs to its running Assignment, in order | 4, none while paused | 2 s doubling to 60 s; one that waits for a worker slot tries again after 2 s |
+| `hifox` | HiFoxExecutor | Advances the original HiFox task and Run, reconciles writes and reports verified outcomes | 1, none while paused | Polls active Runs and retries transient failures with backoff |
 | `relay` | Sessions | Steers a worker's report or question, or a person's follow-up, into the main Session's turn | 1, in queue order | 2 s doubling to 60 s |
 | `notice` | Sessions | Injects a notice into the main Session without waking it | 1, in queue order | 2 s doubling to 60 s |
 | `reply` | Outbox | Sends a message for a Channel through its Source, after the earlier messages of its Ticket to its conversation that have not failed three times; withdrawing the message cancels it | 1, none while paused | 5 s doubling to 300 s; one whose Source is off, or behind an earlier message, tries again after 5 s |
@@ -194,17 +193,11 @@ Plugins receive `SourceHost`: the registry and `context(kind)`. The kind itself 
 
 That context supplies deployment and commands, setup readiness (`ready`, `configured`, `problem`), configuration, `receive`, `atomic`, and typed `state`. It also exposes Thread reads and metadata writes, Ticket reads and binding/closure commands, Trigger reads, `notify` through Outbox, and `report` for declared health entries.
 
-### DshExecutor
+### HiFoxExecutor
 
-`DshExecutor` (`src/executor/dsh.ts`) provides one Session and directory per Ticket. `start` and `deliver` enqueue `launch` and `delivery` effects. `stop` cancels the turn through `Store.afterCommit`, so a rolled-back end does not stop the worker.
+The Engine calls the existing Executor interface directly. `start`, `deliver` and `stop` enqueue one durable `hifox` effect per Ticket. HiFox keeps the original Task and Run identities, while SQLite records the write intent, Assignment and input revision that authorized each remote operation.
 
-`prepare(ticket, outcome)` supplies the Engine's `prepareTicket` hook: short name, directory and `ticketExecution` assignment text. `workerSessionId(ticket.id)` derives the Session id.
-
-`WorkerSlots` reserves capacity before a launch or a delivery that wakes an idle worker. A human message can use one slot beyond `maxWorkers`, and wakes have priority over launches. `activeCount` supplies panel load.
-
-Transient provider and network failures get three retries. Launches use effect backoff; failed turns receive continuation messages after 15, 30 and 60 seconds. `inputMessage` renders each Input from current Ticket state, and `mandateInstructions` adds the matched-rule limits for inferred work.
-
-`install` subscribes to Session events; `dispose` unsubscribes. A turn end normally reports waiting, except after readiness or while human action is required. Errors report failed. At startup, `resume` reports interrupted Assignments through `assignmentInterrupted` and requeues pending launches that do not wait for a person, oldest Ticket first.
+On restart the executor restores the queued effect without resetting its backoff. It polls a confirmed Run by receipt. When a write receipt is missing, it reconciles the saved intent before advancing work. Schema 12 moves legacy HiFox launch and delivery effects into the single queue and retires Feishu records.
 
 ### MasterAssessor
 
@@ -246,7 +239,7 @@ Each model request binds the Session to the current prompt revision. The revisio
 | --- | --- |
 | `src/app/runtime.ts` | The composition root: builds the parts with the interfaces they use, registers the routes and the Source host, and starts and stops dsh-superagent |
 | `src/app/notices.ts` | Domain events and worker reports into notices and relays for the main Session |
-| `src/app/tools/main.ts`, `src/app/tools/executor.ts` | Tool arguments of the main Session and the Executor Sessions into calls of the core classes, and their results into cards |
+| `src/app/tools/main.ts` | Tool arguments of the main Session into calls of the core classes, and their results into cards |
 | `src/app/http.ts`, `src/app/views/`, `src/app/api.ts` | HTTP requests into calls, and Store reads into the panel's views; `api.ts` types every route for the panel |
 | `src/app/resources.ts`, `src/app/links.ts`, `src/app/cards.ts` | Resource names into reads, source messages into links, records into compact cards for models |
 | `src/deployment.ts`, `src/setup.ts`, `src/infra/` | Setup probes and problems, CLI transport, the agent's process environment |
@@ -275,9 +268,8 @@ Each model request binds the Session to the current prompt revision. The revisio
 
 The app still has a few channel-specific integrations:
 
-- Outbox applies the Feishu chat word limit, and the links layer resolves Feishu message links and Feishu reply targets.
-- Resources support Feishu originals. MasterAssessor can read committed files from an optional local Git checkout during an assessment.
-- Sessions include the Feishu skill when applicable. Setup probes the configured Feishu CLI.
+- MasterAssessor can read committed files from an optional local Git checkout during an assessment.
+- Schema 12 removes historical Feishu triggers, tickets, threads, decisions and queued replies from the local orchestrator database.
 - The standard plugin mounts the DingTalk source and HiFox executor when their configuration is enabled. The main Session selects a HiFox Agent using verified DingTalk context and the configured Space's available Agent roster. The Ticket records that selection for dispatch, follow-ups and Run verification. HiFox owns Agent execution tools and resources. Historical records remain readable.
 
 ## Modules
@@ -318,6 +310,7 @@ The app still has a few channel-specific integrations:
 | `src/app/store.ts` | The Store, and `Receipt`, a message of the outbox |
 | `src/app/store-read.ts` | `storeReads`: the Store's read queries for the views, the tools and the Sources' polls, which never write |
 | `src/app/migration.ts` | The schema 11 migration: one step from schema 10 that writes every stored record in its current shape |
+| `src/app/retire-feishu.ts` | Schema 12 effect conversion and removal of Feishu records from SQLite |
 | `src/app/effects.ts` | Effects |
 | `src/app/versions.ts` | `Versions`: a record kept as numbered snapshots with a pointer to the current one, for the settings and the prompts |
 | `src/app/cache.ts` | `TextCache`: texts kept in memory within a size, the least recently used dropped first |
@@ -345,7 +338,6 @@ The app still has a few channel-specific integrations:
 | `src/app/resources.ts` | `RESOURCES` and `readResource`: what `orchestrator_read` reads, for each role |
 | `src/app/tools/tool.ts` | The `Tool` type, `readTool`, the `orchestrator_read` of both roles, and `AcknowledgementSchema` |
 | `src/app/tools/main.ts` | The main Session's tools |
-| `src/app/tools/executor.ts` | An Executor Session's tools |
 | `src/app/http.ts` | The `/orchestrator/api` routes: the same-origin check, request limits and one status per kind of failure |
 | `src/app/api.ts` | `Api`, every route with its parameters, query, body and response, and the filters of the lists; it imports only types, so the panel bundles it |
 | `src/app/views/text.ts` | The two forms of a view's text: `preview`, plain text on one line, and `markdown` without HTML; `plain` and `readable` |
@@ -355,12 +347,11 @@ The app still has a few channel-specific integrations:
 | `src/app/views/sources.ts` | The Source status: each Source instance's state, its last day's counts, and what it filtered and dropped in that day |
 | `src/app/views/settings.ts` | The settings page's view: each block with its revision, each Source's settings with its kind's form, and the execution environment |
 | `src/app/views/overview.ts` | The overview: Tickets that need a person, problems, the last day's flow and the Executor's load |
-| `src/executor/dsh.ts` | The DshExecutor, `WorkerSlots`, `ticketExecution`, `inputMessage` and `mandateInstructions` |
+| `src/app/ticket-context.ts` | Trigger and input formatting, plus references for historical ticket sessions |
 | `src/executor/codex-desktop.ts` | Reads local Codex Desktop projects and sessions and opens a session in a verified project through the Desktop tasks relay |
 | `src/executor/codex-history.ts` | Verifies per-card delivery against local original Codex sessions and committed Git artifacts |
-| `src/executor/hifox.ts` | The opt-in HiFox executor, durable write intents, Run reconciliation and linked Codex execution |
+| `src/executor/hifox.ts` | The only ticket executor, with durable HiFox write intents, Run reconciliation and linked Codex execution |
 | `src/executor/hifox-port.ts` | HiFox pilot scope, transport and independent evidence contracts |
-| `src/executor/background.ts` | A worker's background work in DeepSeek Harness, the shell jobs its Session owns (`ctx.jobs`) and its subagents (`ctx.subagents`): `runningJobs`, `untilQuiet`, `killJobs`, `collectJobs`, `stopSubagents`, `stopBackground`, `until`, and `cancelled`, the workers whose turn a stop of their subagents cancelled |
 | `src/infra/repository.ts` | Bounded assessment reads from the committed HEAD of the configured local Git worktree |
 | `src/infra/pilot-cli.ts` | Bounded HiFox and DingTalk CLI subprocess calls |
 | `src/infra/commands.ts` | `Commands`, the CLI transport: `run`, `lark` as the bot, and local `git`. `CliError` carries the code a command's output reports and a command that prints nothing fails with how it ended, never with its arguments; `validItems` skips and counts the malformed items of a list |
@@ -377,7 +368,7 @@ The app still has a few channel-specific integrations:
 | `src/sources/dingtalk-context.ts` | Bounded, authenticated same-conversation quote and preceding messages for DSH routing |
 | `src/executor/hifox.ts`, `src/executor/hifox-port.ts` | HiFox task/Run orchestration, persisted bindings and evidence checks through an injected gateway |
 | `src/executor/hifox-cli.ts` | HiFox CLI task and Run verification and handoff of the scoped request to the selected Agent |
-| `src/sources/feishu.ts` | The Feishu kind and plugin entry, exported as `./feishu-watch` |
+| `src/sources/feishu.ts` | Legacy Feishu adapter primitives used by compatibility fixtures |
 | `src/sources/dingtalk.ts` | Trusted DingTalk pilot intake, request threading and original-channel replies |
 | `src/sources/dingtalk-socket.ts` | The opt-in same-account Unix socket used by the DingTalk listener |
 | `src/sources/feishu-trigger.ts` | Feishu messages as Triggers, by one rule for live events, history pages and topic pages |
@@ -398,6 +389,7 @@ The app still has a few channel-specific integrations:
 | `src/client/settings.tsx` | The Settings tab: the group navigation and the group on screen |
 | `src/client/settings-kit.tsx` | The building blocks of settings blocks: the settings the stage groups share, `useBlockDraft`, the fields, among them a Source kind's, and the history of saves |
 | `src/client/prompts.tsx` | The Prompts settings: the page owns the view it read and its editor the draft, and the Edit, Full prompt and History tabs render from them; a built-in part's editor shows a changed default and keeps or drops the override |
+| `src/client/prompt-reference.ts`, `src/client/prompt-reference.zh.md` | Chinese reference rendering for packaged prompt sections and filled templates in the Prompts panel |
 | `src/client/prompt-config.ts` | The prompt configuration by section, by the team sections, skill names, built-in parts (`part/<key>`, with `withOverride`) and part headings the prompt views give, and the line diff of the full prompt, as pure functions |
 | `src/client/deployment.tsx` | The Deployment settings, also shown in DeepSeek Harness's Plugin Manager |
 | `src/client/dreaming.tsx` | Runs and reviews Dreaming batches and copies published replay snapshots |
@@ -411,7 +403,7 @@ The app still has a few channel-specific integrations:
 | `src/client/locales.ts` | All copy in both languages, and the glossary of [001 Domain model](001-domain.md) |
 | `src/client/client.css`, `css.d.ts` | The panel's stylesheet, loaded as text |
 
-`src/sources/feishu.ts` is built separately and exported as `./feishu-watch`. The bundle's `cordis.patch.yml` inserts the main plugin and the disabled-by-default Feishu plugin.
+The bundle patch inserts the main plugin and its router and Dreaming presets. DingTalk and HiFox are assembled by the main plugin.
 
 ## Tests
 
@@ -430,7 +422,6 @@ The app still has a few channel-specific integrations:
 | `tests/commands.spec.ts` | CLI transport and command error handling |
 | `tests/admission-context.spec.ts`, `tests/feishu-image.spec.ts` | The Thread window of assessments, and Feishu image reads |
 | `tests/assessment.spec.ts` | What the MasterAssessor keeps per Eval, and when it lets go |
-| `tests/background.spec.ts` | Waiting for a worker's shell jobs and subagents: an end that woke it, and a host that stops |
 | `tests/bundle-patch.spec.ts` | The bundle's patch, read as DeepSeek Harness reads it, and the agent preset of Executor Sessions it defines |
 | `tests/effects.spec.ts` | The effect queue: coalescing, limits, retries with backoff, health and shutdown |
 | `tests/passes.spec.ts` | Passes: one at a time, the ones asked for during a pass run as one after it, and the runtime health a failed pass reports |
@@ -445,7 +436,6 @@ The app still has a few channel-specific integrations:
 | `tests/dingtalk-socket.spec.ts` | Local DingTalk socket framing, permissions, stale recovery and shutdown |
 | `tests/dingtalk-context.spec.ts` | Authenticated same-conversation reads, ordering, scope and unavailable context |
 | `tests/tools.spec.ts` | The Sessions' tools: what `orchestrator_read` reads for each role, and the shapes and checks of the other main Session tools |
-| `tests/runtime-concurrency.spec.ts` | Work that overlaps: Triggers during a pass, Tickets that change during deliveries and launches |
 | `tests/http.spec.ts` | The same-origin and loopback checks, the status of each kind of failure, the body limit, path parameters and queries |
 | `tests/settings.spec.ts` | Settings saves that race a model or account check, a Policy sync that a save outran, and the refusals of the pause, a sync and a block |
 | `tests/views.spec.ts` | What the management views derive from the Store, such as the Thread a dropped message belongs to |

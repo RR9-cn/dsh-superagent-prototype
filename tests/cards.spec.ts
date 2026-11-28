@@ -1,7 +1,7 @@
 import { expect, it } from 'vitest'
 import { masterPrompt, workerPrompt } from '../src/app/context.ts'
 import { composePrompt, defaultPrompts } from '../src/app/prompts.ts'
-import { bundledSkills, promptFile } from '../src/app/skill-files.ts'
+import { promptFile } from '../src/app/skill-files.ts'
 import { TICKET_STATES, decisionCard, decisionDetails, ticketCard, ticketDetails, triggerCard, threadCard } from '../src/app/cards.ts'
 import { key, said, type Decision, type Thread, type Ticket, type Trigger } from '../src/core/index.ts'
 
@@ -65,14 +65,14 @@ const RULES: [rule: string, file: string, says: string[], gone?: string[]][] = [
   ['A question goes back where the person who raised it wrote', 'handoff',
     ['a question raised by a person\'s message is asked where that message was written, and any other question in the original ticket conversation'],
     ['must also reach the original ticket conversation']],
-  ['A question goes back where the person who raised it wrote', 'dispatch',
-    ['the host routes it to the conversation of the human message that raised it, else to the original ticket source']],
+  ['HiFox owns result and clarification delivery', 'dispatch',
+    ['The host handles terminal results and clarification delivery.']],
   ['A question goes back where the person who raised it wrote', 'handoff-orchestrator', ['purpose=attention with ticket_id'], ['The host selects the original ticket source']],
   ['A dropped message never arrives, and nobody resends it elsewhere', 'replies',
     ['A dropped reply will never arrive, because its conversation can no longer receive it or its Source no longer listens to it; do not resend it elsewhere.',
       'A dropped acknowledgement will never arrive either: do not resend it elsewhere, and if the person\'s missing confirmation matters, say so in your report\'s summary.']],
   ['The main Session has no tool that messages a worker', 'replies',
-    ['wait for the worker\'s report, or request one with orchestrator_ticket_request_status when the ticket is idle'], ['ask the worker']],
+    ['wait for the verified HiFox report'], ['ask the worker']],
   ['The main Session has no tool that messages a worker', 'shared', ['leave those activities to workers'], ['delegate']],
   ['The main Session has no tool that messages a worker', 'cli', ['leaves other context reads and local downloads to workers'], ['delegate']],
   ['The main Session has no tool that messages a worker', 'dispatch', [], ['Ask a worker']],
@@ -96,7 +96,7 @@ const RULES: [rule: string, file: string, says: string[], gone?: string[]][] = [
   ['Removed rules stay removed', '*', [], ['at most three investigation/implementation rounds', 'continue dispatch until explicitly instructed', 'page-size']],
 ]
 const textOf = (file: string) => file === '*' ? composePrompt(defaultPrompts(), 'orchestrator') + composePrompt(defaultPrompts(), 'worker')
-  : file.startsWith('skill ') ? bundledSkills[file.slice(6) as 'feishu'].content : promptFile(file)
+  : promptFile(file)
 it.each(RULES)('%s (%s)', (_rule, file, says, gone = []) => {
   const text = textOf(file)
   for (const words of says) expect(text).toContain(words)

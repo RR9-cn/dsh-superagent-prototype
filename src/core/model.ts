@@ -303,7 +303,7 @@ export interface Ticket {
   origin: { triggerId: string; triggerIds: string[] }
   /** What its Executor chose: its short name, directory and assignment text. */
   execution?: Execution
-  /** Accepted executor route. Older tickets are DSH tickets. */
+  /** Accepted executor route. Absent on historical local tickets. */
   executionTarget?: 'hifox'
   /** Assigned by DSH when it accepts a DingTalk candidate. Follow-ups retain this destination. */
   hiFoxAgent?: { space: string; agentId: string; agentName?: string }

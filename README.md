@@ -4,7 +4,7 @@
 >
 > We have adapted it for publication, so it is not identical to our internal version or the implementation described in *Exploring Super-agent Design: Towards a More Autonomous Agent System*. Some designs discussed in the article are directions for future development and are not implemented in this prototype.
 
-dsh-superagent is a proactive agent packaged as a bundle for [DeepSeek Harness](https://www.deepseek.com/en/harness/). It accepts requests from configured sources. A Feishu request can run in its own DSH Session and directory. An explicitly configured DingTalk pilot can delegate work to HiFox. The panel shows execution status and work that needs a person.
+dsh-superagent is a proactive agent packaged as a bundle for [DeepSeek Harness](https://www.deepseek.com/en/harness/). It evaluates DingTalk requests in DSH and dispatches authorized tickets to HiFox. DSH persists the execution state and resumes tracking the original HiFox card and Run after restart. The panel shows execution status and work that needs a person.
 
 It is also a way of working with an agent: **take as little human attention as possible, and give as much value as possible.** An agent that can act for a whole team can also waste a whole team's attention, so it acts only when asked or when a rule the team wrote allows it, and speaks only when someone must act or can use a result. [docs/000-philosophy.md](docs/000-philosophy.md) explains the principle and what it asks of the operator.
 

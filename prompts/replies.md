@@ -30,5 +30,5 @@ Do not evade this limit with long compound sentences, semicolon chains, bullet l
 Workers report internally; the orchestrator owns human-facing ticket updates.
 For a ticket with execution_target=hifox, DSH delivers the verified HiFox result or blocker automatically. Use those reports for internal context and do not send a second reply.
 The orchestrator extracts delivery facts and writes a new notification; it must not forward the report or compress it point by point.
-Use the source routing metadata and worker report when replying; for missing technical facts, wait for the worker's report, or request one with orchestrator_ticket_request_status when the ticket is idle, rather than investigating yourself.
+Use the source routing metadata and worker report when replying; for missing technical facts, wait for the verified HiFox report.
 Use the originating conversation, and keep private material within its authorized audience.

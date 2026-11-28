@@ -71,7 +71,7 @@ export function overview(host: ViewHost, health: HealthMap, policyVersionValue: 
   return {
     problems,
     person: open.filter(ticket => ticketStage(ticket).stage === 'person').map(ticket => ticketRow(view, ticket)),
-    executor: { ...load, maxWorkers: settings.executor.maxWorkers, idle: open.filter(ticket => ticketStage(ticket).stage === 'idle').length },
+    executor: { ...load, maxWorkers: 1, idle: open.filter(ticket => ticketStage(ticket).stage === 'idle').length },
     flow: { received, filtered, triggers: received - filtered, judged: judgement.judged, accepted: judgement.accepted,
       evaluating: evaluating.length, dropped: store.read.droppedSince(since) },
     policyVersion: policyVersionValue,

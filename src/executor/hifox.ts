@@ -1,7 +1,7 @@
 import { Later, PollAgain, type Effects } from '../app/effects.ts'
 import type { Store } from '../app/store.ts'
 import {
-  key, latestAssignment, liveTicket, waitsForPerson, type Assignment, type Engine, type Policy, type Ticket, type TicketInput,
+  key, latestAssignment, liveTicket, waitsForPerson, type Assignment, type Engine, type Executor, type Policy, type Ticket, type TicketInput,
 } from '../core/index.ts'
 import { family, record } from '../kv.ts'
 import { DINGTALK, dingTalkMeta, pilotTrigger } from '../sources/dingtalk.ts'
@@ -110,7 +110,7 @@ interface Inputs {
  * Serializes the pilot's external writes through one durable effect per ticket. A persisted intent can only be
  * resolved by an exact receipt or reconciliation. The active-run reservation outlives the originating Assignment.
  */
-export class HiFoxExecutor {
+export class HiFoxExecutor implements Executor {
   private readonly now: () => number
   private readonly reconcileMs: number
   constructor(private readonly host: Host) {
@@ -118,7 +118,17 @@ export class HiFoxExecutor {
     this.reconcileMs = host.pilot.reconcileMs ?? 120_000
     host.effects.handle('hifox', ({ ticketId }) => this.step(ticketId), { limit: () => host.paused() ? 0 : 1 })
   }
-  queue(ticketId: string): void { this.host.effects.enqueue('hifox', ticketId, { ticketId }) }
+  start(ticket: Ticket): void { this.schedule(ticket) }
+  deliver(ticket: Ticket): void { this.schedule(ticket) }
+  stop(ticket: Ticket): void { this.schedule(ticket) }
+
+  activeCount(): number { return this.host.store.get(activeRun) ? 1 : 0 }
+
+  private schedule(ticket: Ticket): void {
+    if (ticket.executionTarget === 'hifox') this.queue(ticket.id)
+  }
+
+  private queue(ticketId: string): void { this.host.effects.enqueue('hifox', ticketId, { ticketId }) }
   /** Exposes reconciled identities and a manual handoff reason for the pilot operator. */
   status(ticketId: string): Readonly<Binding> | undefined { return this.host.store.get(bindings(ticketId)) }
   /** Restores domain work still awaiting an effect without resetting a queued effect's backoff. */
@@ -298,7 +308,7 @@ export class HiFoxExecutor {
     const delivered = inputs.notes.filter(note => current.ticket.undelivered.includes(note.id)).map(note => note.id)
     if (current.assignment.state === 'running' && delivered.length) this.host.engine.inputsDelivered(ticket.id, assignment.id, delivered)
   }
-  private async deliver(ticket: Ticket, assignment: Assignment, binding: Binding, inputs: Inputs): Promise<void> {
+  private async deliverInputs(ticket: Ticket, assignment: Assignment, binding: Binding, inputs: Inputs): Promise<void> {
     const { engine, store } = this.host
     for (const { input, text } of inputs.triggerInputs) {
       if (!this.authorized(ticket.id, assignment.id, inputs.revision)) throw new Later('The current HiFox inputs changed')
@@ -456,7 +466,7 @@ export class HiFoxExecutor {
     if (status !== 'systemError' && this.current(ticket.id)?.assignment.report?.summary !== report) {
       engine.report(ticket.id, { state: status === 'active' ? 'progress' : 'waiting', summary: report })
     } else if (status === 'systemError') this.block(ticket.id, binding, report)
-    if (!codex.observed) await this.deliver(ticket, assignment, binding, inputs)
+    if (!codex.observed) await this.deliverInputs(ticket, assignment, binding, inputs)
     throw new PollAgain('Watching the linked Codex execution', taskFollowupInterval)
   }
   private async reconcileRetiredBinding(ticketId: string, binding: Binding): Promise<void> {
@@ -645,7 +655,7 @@ export class HiFoxExecutor {
       await this.advanceCodex(ticket, assignment, binding, inputs)
       return
     }
-    await this.deliver(ticket, assignment, binding, inputs)
+    await this.deliverInputs(ticket, assignment, binding, inputs)
     let attempt = binding.attempts[assignment.id]
     if (!attempt) {
       if (store.get(activeRun)) throw new Later('The HiFox pilot run slot is occupied')
@@ -669,7 +679,7 @@ export class HiFoxExecutor {
       if (binding.taskStatus?.category !== 'started' && await this.syncTask(ticketId, binding, 'started')) return
       if (!this.authorized(ticketId, assignment.id, inputs.revision)) throw new Later('The current HiFox work changed during status update')
       engine.assignmentStarted(ticketId, assignment.id)
-      await this.deliver(ticket, assignment, binding, inputs)
+      await this.deliverInputs(ticket, assignment, binding, inputs)
       if (inputs.notes.length) await this.deliverNotes(ticket, assignment, binding, inputs, binding.taskUuid!)
     }
     const run = await this.observe(ticketId, binding, attempt)

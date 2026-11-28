@@ -1,13 +1,59 @@
 // @vitest-environment jsdom
 // The Prompts settings.
 import { act } from 'react'
-import { builtInBase, builtInParts, defaultPrompts } from '../src/app/prompts.ts'
+import { builtInBase, builtInParts, defaultPrompts, policySection } from '../src/app/prompts.ts'
 import { expect, it } from 'vitest'
+import { chinesePrompt } from '../src/client/prompt-reference.ts'
 import { zh } from '../src/client/locales.ts'
 import { usePanel, mount, settle, all, tab, click, type, text, field, at } from './fixtures/panel.tsx'
 import { server, promptVersion } from './fixtures/panel-server.ts'
 
 usePanel()
+it('has a Chinese reference for every default section and preserves dynamic Policy values', () => {
+  for (const [id, part] of Object.entries(builtInParts())) {
+    const translation = chinesePrompt(id, part.text)
+    expect(translation, id).toMatch(/[\u4e00-\u9fff]/)
+    for (const placeholder of part.placeholders ?? []) expect(translation, id).toContain(placeholder)
+  }
+  for (const id of ['communication', 'scope', 'delivery'] as const) {
+    expect(chinesePrompt(id, defaultPrompts()[id]), id).toMatch(/[\u4e00-\u9fff]/)
+  }
+  const rule = { id: 'rule-one', name: 'Existing rule', enabled: true, instruction: 'Keep existing settings.' }
+  const policy = policySection({ ...server.settings, policy: { ...server.settings.policy, rules: [rule] } })
+  const rendered = chinesePrompt(policy.key, policy.text, true)
+  expect(rendered).toContain('当前启用的规则')
+  expect(rendered).toContain('- Existing rule (rule-one): Keep existing settings.')
+  expect(chinesePrompt('runtime/dispatch', 'Old dispatch content')).toBeUndefined()
+})
+
+it('reads the Chinese reference across views without changing saved prompts or the English draft', async () => {
+  at({ page: 'settings', query: { group: 'prompts' } })
+  await mount()
+  await type(field<HTMLTextAreaElement>(zh.promptBody), 'My English draft.')
+  await click(tab(zh.promptChineseReference))
+  expect(text()).toContain(zh.promptReferenceUnavailable)
+  expect(text()).toContain('My English draft.')
+  expect(document.querySelector('textarea, .dt-savebar')).toBeNull()
+  await click(builtInItem(zh['promptPart.runtime/dispatch']))
+  expect(text()).toContain('候选卡包含来源引用')
+  await click(tab(zh.promptViewFull))
+  expect(text()).toContain('候选卡包含来源引用')
+  expect(text()).toContain('My English draft.')
+  expect(document.querySelector('.dt-preview-part[data-editable]')).toBeNull()
+  const preview = server.requests.filter(request => request.path === 'prompts/preview').at(-1)
+  expect(preview?.body).toMatchObject({ communication: 'My English draft.' })
+  await click(tab(zh.promptViewHistory))
+  await click(zh.promptViewRevision)
+  expect(text()).toContain('在来源会话交付。')
+  expect(server.requests.filter(request => request.method === 'PUT')).toEqual([])
+  await click(tab(zh.promptOriginal))
+  await click(tab(zh.promptViewEdit))
+  await click(builtInItem(zh['promptPart.communication']))
+  expect(field<HTMLTextAreaElement>(zh.promptBody).value).toBe('My English draft.')
+  await click(zh.save)
+  expect(server.prompts.current.config.communication).toBe('My English draft.')
+})
+
 it('lists the team sections, then the built-in parts, edits and saves them separately from settings, and resets one section', async () => {
   at({ page: 'settings', query: { group: 'prompts' } })
   await mount()
@@ -42,15 +88,10 @@ it('keeps a conflicting prompt draft, rebases it onto the newer version and save
   expect(server.prompts.current.config).toMatchObject({ communication: 'Mine', scope: 'Theirs' })
 })
 
-it('shows a built-in skill with the CLI notes in the full prompt, editable as a built-in part, and adds a team skill but no skill under a built-in name', async () => {
+it('adds a team skill with a valid name', async () => {
   at({ page: 'settings', query: { group: 'prompts' } })
   await mount()
-  await click(tab(zh.promptViewFull))
-  await act(async () => { const select = field<HTMLSelectElement>(zh.promptPreviewTarget); select.value = 'skill/feishu'; select.dispatchEvent(new Event('change', { bubbles: true })) }); await settle()
-  expect(text()).toContain('## CLI usage')
-  expect(all('.dt-preview-part[data-editable] b').map(name => name.textContent)).toEqual([zh['promptPart.skill/feishu']])
-  await click(tab(zh.promptViewEdit))
-  for (const name of ['Bad Name', 'feishu']) {
+  for (const name of ['Bad Name']) {
     await type(field<HTMLInputElement>(zh.promptAddSkill), name)
     await click(zh.promptAddSkillAction)
     expect(document.querySelector('[role="alert"]')?.textContent).toBe(zh.promptSkillNameInvalid)

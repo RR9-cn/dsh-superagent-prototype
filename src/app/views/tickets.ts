@@ -1,7 +1,7 @@
 /** Ticket list, ticket detail, mandate basis formatting, and executor load views. */
 import { liveTicket, threadKey, ticketStage, type AcceptMode, type AdmissionCell, type MandateBasis, type Ticket,
   type TicketStage } from '../../core/index.ts'
-import { workerSessionId } from '../../executor/dsh.ts'
+import { workerSessionId } from '../ticket-context.ts'
 import type { Store } from '../store.ts'
 import { channelLink, decisionView, newestFirst, page, snapshot, threadSummary, ticketLine, type Snapshot,
   type ViewHost } from './records.ts'
@@ -52,7 +52,7 @@ export interface ExecutorLoad { running: number; queued: number }
 export function executorLoad(store: Store, running: number): ExecutorLoad {
   const queued = (ticket: Ticket) => {
     const stage = ticketStage(ticket)
-    return ticket.executionTarget !== 'hifox' && stage.stage === 'working' && stage.action === 'queued'
+    return ticket.executionTarget === 'hifox' && stage.stage === 'working' && stage.action === 'queued'
   }
   return { running, queued: store.tickets.open().filter(queued).length }
 }

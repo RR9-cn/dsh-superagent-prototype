@@ -6,7 +6,7 @@ import { afterEach, beforeEach, expect, vi } from 'vitest'
 import { z } from 'zod'
 import type { ConfigForm, ConfigFormSnapshot } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { Api, ApiResponse, RouteParams } from '../../src/app/api.ts'
-import { SKILL_NAME, SKILL_PREFIX, TEAM_SECTIONS, builtInBase, builtInPart, builtInParts, composePrompt, composeSkill, defaultPrompts,
+import { SKILL_NAME, SKILL_PREFIX, TEAM_SECTIONS, builtInBase, builtInPart, builtInParts, composePrompt, defaultPrompts,
   environmentSection, policySection, promptParts } from '../../src/app/prompts.ts'
 import type { DroppedReply, HistoryView, Problem, PromptsView, SetupView, SourceStatusRow, SourceView, StateView, ThreadPageView,
   ThreadRow, TicketPageView,
@@ -98,7 +98,7 @@ export interface PanelServer {
   misuse: string[]
   queued: Set<string>
   searching?: (query: string) => Promise<void>
-  setup: SetupView
+  setup: Omit<SetupView, 'accounts'> & { feishuProblem: SetupView['problem']; accounts: (NonNullable<SetupView['accounts']> & { feishu: { appId: string; brand: 'feishu' | 'lark'; botId: string; name: string } | null }) | null }
   hifox: StateView['hifox']
   listenerStartProblem?: string
   health: Record<string, Health>
@@ -252,7 +252,7 @@ function initial(): PanelServer {
       accounts: { repositoryPath: '/srv/src/widgets', feishu: { appId: 'cli_bot', brand: 'feishu', botId: 'ou_bot',
         name: 'Widgets Bot' } } },
     settings, revisions: { policy: 3, eval: 1, executor: 0 },
-    prompts: { masterId: 'master', sections: TEAM_SECTIONS, skillName: SKILL_NAME.source, builtin: ['feishu'],
+    prompts: { masterId: 'master', sections: TEAM_SECTIONS, skillName: SKILL_NAME.source, builtin: [],
       skillPrefix: SKILL_PREFIX, revision: 0, current: { ...defaults, config: defaultPrompts() },
       defaults: defaultPrompts(), parts: Object.entries(builtInParts()).map(([key, part]) => ({ key, ...part, base: builtInBase(part.text) })),
       defaultChanged: [], revisions: [{ ...defaults, changed: [] }], sessions: [], notificationPending: false, next_offset: null },
@@ -416,8 +416,7 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     return { revision: server.prompts.revision, context_delivery: 'injected' }
   } },
   'POST prompts/preview': { body: true, answer: ({ body }) => {
-    const skills = [...server.setup.accounts?.feishu ? ['feishu'] : [], ...Object.keys(body.skills)].map(name => [name,
-      composeSkill(body, name)])
+    const skills = Object.entries(body.skills)
     // The generated parts from their templates, without variables or rules.
     const environment = environmentSection(body, []), policy = policySection(SettingsSchema.parse({ policy: { rules: [] } }), body)
     return { parts: { orchestrator: promptParts(body, 'orchestrator', environment, policy), worker: promptParts(body, 'worker', environment) },

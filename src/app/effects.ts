@@ -1,6 +1,6 @@
 /**
  * Signals that an effect cannot run right now, such as when processing is paused or all worker slots are full.
- * Effects reschedules the row after the initial retry delay without incrementing its failure count, and DshExecutor throws it from launch and delivery handlers.
+ * Effects reschedules the row after the initial retry delay without incrementing its failure count, including when HiFox work is waiting for its Run slot.
  */
 export class Later extends Error {
   constructor(message: string, readonly delayMs?: number) { super(message) }
@@ -23,9 +23,9 @@ export interface EffectPayloads {
   'dreaming-maintenance': Record<string, never>
   /** Build an Eval's candidate card and relay it to the main Session; the key is the Eval ID. */
   assessment: { triggerId: string }
-  /** Launch a pending Assignment; the key is the Assignment ID. */
+  /** Legacy queue kind read during upgrades. The key is the Assignment ID. */
   launch: { ticketId: string; assignmentId: string }
-  /** Hand a ticket's waiting Inputs to its running Assignment; the key is the Ticket ID. */
+  /** Legacy queue kind read during upgrades. The key is the Ticket ID. */
   delivery: { ticketId: string }
   /** Advance a HiFox ticket or reconcile its outstanding external write, keyed by ticket ID. */
   hifox: { ticketId: string }
@@ -57,7 +57,7 @@ type Task = { kind: EffectKind; key: string; done: Promise<void> }
 
 /**
  * Durable SQLite-backed queue that persists side effects inside command transactions and dispatches them after commit.
- * Coordinates per-kind handlers, concurrency limits, exponential backoff, and health reporting for MasterAssessor, DshExecutor, Sessions, and Outbox.
+ * Coordinates per-kind handlers, concurrency limits, exponential backoff, and health reporting for MasterAssessor, HiFoxExecutor, Sessions, and Outbox.
  */
 export class Effects {
   private readonly handlers = new Map<EffectKind, Handler<never>>()

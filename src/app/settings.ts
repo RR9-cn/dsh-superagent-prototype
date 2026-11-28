@@ -10,7 +10,7 @@ import type { SourceRegistry } from '../sources/registry.ts'
 import { resolveRoleModel } from './role-models.ts'
 import { changedPaths, settingsNotice } from './notices.ts'
 import type { Sessions } from './sessions.ts'
-import { setupChanged, type Setup } from './setup.ts'
+import type { Setup } from './setup.ts'
 import type { Store } from './store.ts'
 import { KV } from '../kv.ts'
 
@@ -47,8 +47,6 @@ const BLOCKS: Record<'policy' | 'eval' | 'executor' | 'source', Block> = {
   source: {
     parse: (value, sources, id) => sources.validate(id, z.object({ enabled: z.boolean(), config: z.unknown() }).parse(value)),
     merge: (settings, value, id) => ({ ...settings, sources: { ...settings.sources, [id]: value as SettingsValue['sources'][string] } }),
-    // Only the management panel may switch source accounts.
-    guard: (current, candidate, origin) => { if (origin !== 'panel' && setupChanged(current, candidate)) throw new UserError('panelOnlyAccounts') },
   },
 }
 
@@ -68,7 +66,7 @@ export interface SettingsHost {
   /** Source host passed to source kinds' policy syncs and label refreshes. */
   readonly sourceHost: SourceHost
   /** Setup state, account/command checks, and restart trigger when setup-read fields change. */
-  readonly setup: Pick<Setup, 'configured' | 'checkAccounts' | 'blockCommands' | 'restart' | 'changed'>
+  readonly setup: Pick<Setup, 'configured' | 'blockCommands' | 'restart'>
   /** Triggers an immediate pass so work newly allowed by a settings save runs right away. */
   requestPass(): void
 }
@@ -164,7 +162,6 @@ export class Settings {
       catch (error) { throw new UserError('modelUnavailable', { block, error: error instanceof Error ? error.message : String(error) }) }
     }
     rules.guard?.(current, candidate, origin)
-    if (this.host.setup.changed(current, candidate)) await this.host.setup.checkAccounts(block, candidate)
     if (stale()) throw new SettingsConflict('Settings changed during the checks. Reload before saving.')
     // Re-read current settings after async checks in case unrelated blocks were saved concurrently.
     const old = store.settings()
@@ -173,7 +170,7 @@ export class Settings {
       const delivery = await sessions.delivery(`settings:${block}`)
       return { saved: true, revision: store.blockRevision(block), policy_changed: false, restarting: false, context_delivery: delivery }
     }
-    const restarting = this.host.setup.changed(old, settings) || !this.host.setup.configured()
+    const restarting = !this.host.setup.configured()
     const before = policyVersion(old), after = policyVersion(settings)
     const scope = (version: SettingsValue) => ({
       scope: (input: { source: string; meta: Record<string, unknown> }) => this.host.sources.scope(input, version) })

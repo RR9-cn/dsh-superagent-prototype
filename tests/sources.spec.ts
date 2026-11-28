@@ -1,19 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { Engine, MemoryRepositories, key, type Assessor, type Executor, type Thread, type Ticket, type Trigger } from '../src/core/index.ts'
+import { Engine, key, type Assessor, type Executor, type Ticket, type Trigger } from '../src/core/index.ts'
 import { backfillChat, consumerRetry, feishuKind, feishuTriggerId, feishuRef, feishuTime, feishuTrigger, historyEvent }
   from '../src/sources/feishu.ts'
 import { KV } from '../src/kv.ts'
-import { apply as applyFeishu, pollThreads as pollFeishuThreads } from '../src/sources/feishu.ts'
+import { pollThreads as pollFeishuThreads } from '../src/sources/feishu.ts'
 import { runFeishu } from '../src/sources/feishu-loops.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
-import { cursorAt, POLL_HORIZON_MS } from '../src/sources/poll.ts'
 import { Store } from '../src/app/store.ts'
-import { Commands, commandError } from '../src/infra/commands.ts'
+import { Commands } from '../src/infra/commands.ts'
 import { HealthBoard } from '../src/infra/health.ts'
 import { testDeployment } from './fixtures/deployment.ts'
 import { SettingsSchema, settingsPolicy } from '../src/policy.ts'
 import { sourceContextOf, type SourceContextDeps } from '../src/app/source-context.ts'
-import { SetupError, type SetupProblem } from '../src/setup.ts'
+import type { SetupProblem } from '../src/setup.ts'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -43,12 +42,6 @@ function host(overrides: Partial<SourceContextDeps> = {}) {
   return { ...value, ...context, health, store, engine, commands: parts.commands, receive, executor }
 }
 const healthOf = new WeakMap<SourceRegistry, HealthBoard>()
-function emptyRegistry(): SourceRegistry {
-  const board = new HealthBoard()
-  const sources = new SourceRegistry(() => SettingsSchema.parse({}), board)
-  healthOf.set(sources, board)
-  return sources
-}
 const subscribed = (h: ReturnType<typeof host>, ref: { source: string; id: string }, meta: Record<string, unknown> = {}) =>
   h.store.threads.save({ key: `${ref.source}:${ref.id}`, ref, createdAt: new Date().toISOString(), subscriptions: ['ticket'], correlated: [], pending: [], meta })
 const openTicket = (id: string): Ticket => ({ id, title: id, decisionId: `d-${id}`, mandate: { strength: 'explicit', policyVersion: '',
@@ -56,28 +49,6 @@ const openTicket = (id: string): Ticket => ({ id, title: id, decisionId: `d-${id
   channels: [], assignments: [], inputs: [], undelivered: [], createdAt: '', updatedAt: '', origin: { triggerId: `source-${id}`, triggerIds: [] } })
 const execution = (name: string) => ({ name, directory: `/w/${name}`, assignment: '' })
 describe('feishu source', () => {
-  it('registers its kind without a bot, and names on its health what setup still needs', async () => {
-    const run = async (overrides: Partial<SourceContextDeps>) => {
-      // The fixture's registry already holds the kind; this one starts empty so the plugin's registration shows.
-      const value = host({ sources: emptyRegistry(), ...overrides })
-      const disposers: (() => unknown)[] = []
-      applyFeishu({ orchestrator: value, effect: (effect: () => () => unknown) => { disposers.push(effect()) } } as never)
-      await vi.waitFor(() => expect(value.health.history).toBeDefined())
-      const registered = value.sources.kind('feishu')
-      // Snapshot health before disposal clears the registered entries.
-      const health = { ...value.health }
-      for (const dispose of disposers) await dispose()
-      return { ...value, registered, health }
-    }
-    const unset = await run({ deployment: testDeployment({ feishu: undefined }) })
-    expect(unset.registered).toBe(feishuKind)
-    expect(unset.health).toMatchObject({ feishu: { state: 'paused', code: 'feishuCliUnset' }, history: { state: 'paused', code: 'feishuBotMissing' } })
-    const problem = new SetupError('feishuBotNotReady', { app: 'cli_bot', status: 'missing' }).problem
-    const refused = await run({ deployment: testDeployment({ feishu: undefined }), feishuProblem: problem })
-    // A failed bot check waits for the operator's fix and a check; it does not retry by itself like a polling error.
-    expect(refused.health.feishu).toEqual({ state: 'paused', detail: problem.detail })
-    expect((await run({ configured: () => false })).health.feishu).toEqual({ state: 'paused', detail: 'Waiting for the deployment check', code: 'setupPending' })
-  })
   it('translates live events into triggers keyed by root message, and drops the bot\'s own messages', () => {
     const trigger = feishuTrigger({ message_id: 'om_2', chat_id: 'oc_1', chat_type: 'group', sender_id: MEMBER, sender_type: 'user', content: 'hi', create_time: '1757376000000', mentions: [{ id: 'cli_bot' }], root_id: 'om_1', parent_id: 'om_1', thread_id: 'omt_1', message_app_link: 'https://applink/x' }, 'ou_bot', 'cli_bot')!
     expect(trigger).toMatchObject({ id: key('feishu', 'om_2'), source: 'feishu', threads: [{ source: 'feishu', id: 'oc_1:om_1' }], actor: { source: 'feishu', id: MEMBER }, human: true, at: '2025-09-09T00:00:00.000Z', url: 'https://applink/x', channel: { source: 'feishu', address: { chatId: 'oc_1', messageId: 'om_2' } }, meta: { chatId: 'oc_1', direct: false, mentioned: true, rootId: 'om_1', parentId: 'om_1', threadId: 'omt_1', messageId: 'om_2' } })

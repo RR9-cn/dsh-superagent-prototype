@@ -13,26 +13,25 @@ import type {} from '@deepseek-ai/dsh-subprocess'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { lockSync } from 'proper-lockfile'
-import { Engine, key, reasonText, type EngineForSettings, type Executor, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
-import { allowedSender, settingsPolicy } from '../policy.ts'
+import { Engine, key, type EngineForSettings, type Executor, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
+import { settingsPolicy } from '../policy.ts'
 import { SourceRegistry } from '../sources/registry.ts'
 import { Commands } from '../infra/commands.ts'
 import type { Deployment, Machine } from '../deployment.ts'
 import { environmentOf, ticketEnvironment, type Variable } from './execution-environment.ts'
 import type { SetupProblem } from '../setup.ts'
-import { DshExecutor, sourceTrigger, triggerMessage, workerSessionId } from '../executor/dsh.ts'
+import { sourceTrigger } from './ticket-context.ts'
 import { HiFoxExecutor } from '../executor/hifox.ts'
 import { hiFoxScope, type HiFoxAgent, type HiFoxPilot, type HiFoxScope } from '../executor/hifox-port.ts'
 import { DINGTALK, dingTalkKind, pilotTrigger, receiveDingTalk, type DingTalkIntake, type DingTalkIntakeResult } from '../sources/dingtalk.ts'
 import { openDingTalkSocket } from '../sources/dingtalk-socket.ts'
 import type { DingTalkListener, DingTalkListenerStatus } from '../sources/dingtalk-listener.ts'
-import { ticketCard } from './cards.ts'
 import { MasterAssessor } from './assessment.ts'
 import { KV } from '../kv.ts'
 import { Store } from './store.ts'
 import { evalsHealth } from './views/overview.ts'
 import { TextCache } from './cache.ts'
-import { Effects, Later } from './effects.ts'
+import { Effects } from './effects.ts'
 import { Dreaming } from './dreaming/dreaming.ts'
 import { DreamingAgent } from './dreaming/agent.ts'
 import { collectOpenVikingAudit } from './dreaming/audit.ts'
@@ -48,21 +47,19 @@ import { Outbox } from './outbox.ts'
 import { dingTalkClarifications } from './dingtalk-clarifications.ts'
 import { Passes } from './passes.ts'
 import { Setup } from './setup.ts'
-import { feishuSettings } from '../sources/feishu.ts'
 import { health, type Health, type SourceContext, type SourceHost } from '../sources/host.ts'
 import { Sessions } from './sessions.ts'
 import { Settings } from './settings.ts'
 import { sourceContextOf, type SourceContextDeps } from './source-context.ts'
 import type { ResourceHost } from './resources.ts'
 import { mainTools, type MainToolsHost } from './tools/main.ts'
-import { executorTools, type ExecutorToolsHost } from './tools/executor.ts'
 
 // Source plugins interact with dsh-superagent exclusively through the `SourceHost` service interface.
 declare module '@deepseek-ai/cordis' { interface Context { orchestrator: SourceHost } }
 const now = (): string => new Date().toISOString()
 
 /**
- * Composition root of dsh-superagent that connects `Store`, `Setup`, `Engine`, `SourceRegistry`, `Effects`, `Outbox`, `Passes`, `Sessions`, `Settings`, `Prompts`, `DshExecutor`, and `MasterAssessor`.
+ * Composition root of dsh-superagent that connects `Store`, `Setup`, `Engine`, `SourceRegistry`, `Effects`, `Outbox`, `Passes`, `Sessions`, `Settings`, `Prompts`, `HiFoxExecutor`, and `MasterAssessor`.
  * Exposes the `SourceHost` service on the Cordis context for source plugins and coordinates startup, setup checks, HTTP route registration, and graceful shutdown.
  * Locks the state directory before opening SQLite so concurrent processes cannot corrupt or double-migrate state.
  */
@@ -77,7 +74,7 @@ export class Runtime extends Service implements SourceHost {
   readonly commands: Commands
   readonly sessions: Sessions
   readonly settings: Settings
-  readonly executor: DshExecutor
+  readonly executor: Executor & Pick<HiFoxExecutor, 'activeCount' | 'resume'>
   readonly hiFox?: HiFoxExecutor
   readonly assessor: MasterAssessor
   readonly outbox: Outbox
@@ -94,7 +91,7 @@ export class Runtime extends Service implements SourceHost {
   private closingFlag = false
   private stopping?: Promise<void>
   private readonly sourceDeps: SourceContextDeps
-  private readonly toolHost: MainToolsHost & ExecutorToolsHost
+  private readonly toolHost: MainToolsHost
   private readonly dingTalk?: DingTalkIntake
   private readonly listenDingTalk?: boolean
   private readonly hiFoxScope?: HiFoxScope
@@ -120,8 +117,7 @@ export class Runtime extends Service implements SourceHost {
       const setup = this.setup = new Setup({ context: ctx, machine, lifetime: this.lifetime, restart })
       const deployed = () => setup.configured()
         ? environmentOf({ deployment: setup.deployment, sources: this.sources, settings: store.settings() }) : undefined
-      const feishu = () => setup.configured() && !!setup.deployment.feishu
-      const prompts = this.prompts = new Prompts(store, () => machine.promptMaxChars.get(), deployed, feishu)
+      const prompts = this.prompts = new Prompts(store, () => machine.promptMaxChars.get(), deployed)
       const masterId = this.masterId = store.get(KV.runtime.masterId) ?? `orchestrator-${key(machine.stateDir)}`
       store.set(KV.runtime.masterId, masterId)
       const commands = this.commands = new Commands(() => setup.deployment, setup.commandEnvironment, this.lifetime)
@@ -135,27 +131,23 @@ export class Runtime extends Service implements SourceHost {
           .catch(() => { /* sync() records its failure in health. */ })
         return () => {}
       })
-      const links: LinkHost = { store, links: this.sourceLinks, commands, sources, lifetime: this.lifetime }
-      const link = (trigger: Trigger, signal?: AbortSignal) => sourceLink(links, trigger, signal)
-      const environment = (ticket: Ticket) => this.ticketEnvironment(ticket)
-      const resources: ResourceHost = { store, pages: new TextCache(4_000_000), prompts, commands, masterId, context: ctx,
+      const links: LinkHost = { store, sources }
+      const link = async (trigger: Trigger) => sourceLink(trigger)
+      const resources: ResourceHost = { store, pages: new TextCache(4_000_000), prompts, masterId, context: ctx,
         promptVersion: id => this.sessions.promptVersion(id), mayRead: (id, revision) => this.sessions.mayRead(id, revision),
-        feishuPageSize: () => feishuSettings(sources).readPageSize, sourceLink: link }
+        repliedTo: trigger => repliedTo(links, trigger), sourceLink: link }
       const sessions = this.sessions = new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'), masterId,
         lifetime: this.lifetime,
-        closing: () => this.closing(), environment,
-        tools: (agent, ticket) => ticket ? executorTools(this.toolHost, ticket) : mainTools(this.toolHost, agent) })
+        closing: () => this.closing(),
+        tools: agent => mainTools(this.toolHost, agent) })
       const policyChanged: EngineForSettings['policyChanged'] = (from, to, effects) => { this.engine.policyChanged(from, to, effects) }
       this.settings = new Settings({ store, sources, engine: { policyChanged }, health: board, context: ctx, lifetime: this.lifetime, sessions,
         sourceHost: this, setup, requestPass: () => { this.passes.request() } })
-      this.executor = new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, health: board.claim('worker'), machine,
-        lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
-        repliedTo: trigger => repliedTo({ store, sources }, trigger) })
       this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
         settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => sources.threadContext(trigger),
         deliver: (id, text) => sessions.prompt(masterId, id, text, 'steer'), candidateCard: candidate => candidateCard(links, candidate) })
       const outbox = this.outbox = new Outbox({ store, effects, sources, commands, paused: () => this.paused() })
-      const { assessor, executor } = this
+      const { assessor } = this
       const policy = () => settingsPolicy(store.settings(), sources)
       if (hiFoxPilot) {
         const { gateway, reconcileMs } = hiFoxPilot
@@ -192,31 +184,18 @@ export class Runtime extends Service implements SourceHost {
         }
         this.dingTalkListener = hiFoxPilot.createDingTalkListener?.(message => this.receiveDingTalk(message))
       }
-      const routeHiFox = (ticketId: string): boolean => {
-        if (store.tickets.get(ticketId)?.executionTarget !== 'hifox') return false
-        if (!this.hiFox) throw new Later('The HiFox executor is unavailable')
-        this.hiFox.queue(ticketId)
-        return true
+      this.executor = this.hiFox ?? {
+        start() { throw new Error('HiFox is not configured.') },
+        deliver() {},
+        stop() {},
+        activeCount: () => 0,
+        resume() {},
       }
-      effects.handle('launch', async payload => {
-        if (routeHiFox(payload.ticketId)) return
-        await executor.launchQueued(payload)
-      }, { limit: () => this.paused() ? 0 : Math.max(this.hiFox ? 1 : 0, executor.launchCapacity()), retry: [5000, 300_000] })
-      effects.handle('delivery', async payload => {
-        if (routeHiFox(payload.ticketId)) return
-        await executor.deliverQueued(payload.ticketId)
-      }, { limit: () => this.paused() ? 0 : 4, quiet: true })
-      const routedExecutor: Executor = {
-        start: (ticket, assignment) => executor.start(ticket, assignment),
-        deliver: (ticket, assignment) => executor.deliver(ticket, assignment),
-        stop: (ticket, assignment, reason) => {
-          if (ticket.executionTarget === 'hifox') this.hiFox?.queue(ticket.id)
-          else executor.stop(ticket, assignment, reason)
-        },
-      }
-      const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor: routedExecutor,
+      const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor: this.executor,
         outbox, prepareTicket: (ticket, outcome) => {
-          if (sourceTrigger({ store }, ticket)?.source !== DINGTALK) return executor.prepare(ticket, outcome)
+          if (sourceTrigger({ store }, ticket)?.source !== DINGTALK || !this.hiFox) {
+            throw new Error('Only DingTalk requests can be assigned to the configured HiFox executor.')
+          }
           if (!outcome.hiFoxAgent || outcome.hiFoxAgent.space !== this.hiFoxScope?.space) {
             throw new Error('Choose an eligible HiFox Agent before accepting the DingTalk request.')
           }
@@ -244,7 +223,7 @@ export class Runtime extends Service implements SourceHost {
         health: this.runtimeHealth, lifetime: this.lifetime, configured: () => setup.configured(), closing: () => this.closing() })
       this.sourceDeps = { store, engine, outbox, commands, sources, get ready() { return runtime.ready },
         get deployment() { return setup.deployment }, configured: () => setup.configured(),
-        get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, receive: trigger => this.receive(trigger) }
+        get setupProblem() { return setup.problem }, receive: trigger => this.receive(trigger) }
       this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources,
         hiFoxAgents: (triggerId, signal) => {
           this.dingTalkOrigin(triggerId)
@@ -276,13 +255,7 @@ export class Runtime extends Service implements SourceHost {
   get deployment(): Deployment { return this.setup.deployment }
   configured(): boolean { return this.setup.configured() }
   get setupProblem(): SetupProblem | undefined { return this.setup.problem }
-  /** Why the Feishu bot is unavailable even though the Feishu Source configures a CLI. */
-  get feishuProblem(): SetupProblem | undefined { return this.setup.feishuProblem }
-  links(): LinkTarget {
-    const resolved = this.setup.configured() ? this.setup.deployment : undefined
-    const links = resolved?.feishu ? { feishu: resolved.feishu } : {}
-    return channel => this.sources.link(channel, links)
-  }
+  links(): LinkTarget { return channel => this.sources.link(channel, {}) }
   ticketEnvironment(ticket: Ticket): Variable[] {
     const trigger = sourceTrigger(this, ticket)
     const { setup: { deployment }, sources } = this
@@ -290,6 +263,7 @@ export class Runtime extends Service implements SourceHost {
   }
   checkSetup(): void { this.setup.check() }
   receive(trigger: Trigger): ReceiveResult {
+    if (trigger.source === 'feishu') throw new Error('The Feishu source has been removed')
     if (trigger.source === DINGTALK) throw new Error('Use receiveDingTalk for authenticated pilot events')
     return this.passes.receive(trigger)
   }
@@ -324,8 +298,7 @@ export class Runtime extends Service implements SourceHost {
     }
     this.sessions.install()
     this.dreamingAgent.install()
-    this.executor.install()
-    await this.sessions.ensure(this.masterId, this.machine.stateDir, 'dsh-superagent orchestrator', 'orchestrator')
+    await this.sessions.ensure(this.masterId, this.machine.stateDir, 'dsh-superagent orchestrator')
     for (const id of this.settings.syncable()) await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })
     // If stop() was called while awaiting setup, session creation, or policy sync, do not start background loops.
     if (this.closing()) return
@@ -337,7 +310,6 @@ export class Runtime extends Service implements SourceHost {
     this.quiet++
     try { retireSources(this.store, this.engine, this.effects) } finally { this.quiet-- }
     this.executor.resume()
-    this.hiFox?.resume()
     const dreaming = this.machine.dreamingOpenViking
     if (dreaming?.automatic) {
       this.dreaming.enableMaintenance(openVikingMemory(dreaming.cli, this.lifetime), () => {
@@ -381,7 +353,7 @@ export class Runtime extends Service implements SourceHost {
       hiFoxAgentRoster: async () => ({ agents: runtime.hiFoxScope ? (await runtime.liveHiFoxRoster()).agents : [] }),
       listenerStatus: () => runtime.listenerStatus(), listenerStart: () => runtime.startListener(),
       listenerStop: () => runtime.dingTalkListener?.stop() ?? runtime.listenerStatus(),
-      get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },
+      get setupProblem() { return setup.problem },
       configured: () => setup.configured(), links: () => runtime.links(), ticketEnvironment: ticket => runtime.ticketEnvironment(ticket),
       checkSetup: () => { setup.check() }, requestPass: () => { passes.request() }, models: () => this.ctx.sessionController.modelCatalog() }
   }
@@ -395,14 +367,10 @@ export class Runtime extends Service implements SourceHost {
       const closeSocket = await this.dingTalkSocket?.catch(() => undefined)
       await closeSocket?.()
       this.assessor.stop()
-      const ids = [this.masterId, ...this.store.tickets.list().map(ticket => workerSessionId(ticket.id))]
-      const agents = ids.map(id => this.ctx.agents.get(id as SessionId)).filter((agent): agent is Agent => agent !== undefined)
-      for (const agent of agents) agent.cancel({ kind: 'user' }, { keepInbox: true })
-      await Promise.allSettled([passes, this.effects.drain(), ...agents.map(agent => agent.whenIdle())])
+      const agent: Agent | undefined = this.ctx.agents.get(this.masterId as SessionId)
+      agent?.cancel({ kind: 'user' }, { keepInbox: true })
+      await Promise.allSettled([passes, this.effects.drain(), agent?.whenIdle()])
       await this.dreamingAgent.shutdown()
-      // The workers' jobs and subagents stop too: their ends would start worker turns without the tool limits released below.
-      await this.executor.shutdown()
-      this.executor.dispose()
       this.sessions.dispose()
       for (const dispose of this.disposers.reverse()) dispose()
       await this.ctx.sessionPersistence.flush()

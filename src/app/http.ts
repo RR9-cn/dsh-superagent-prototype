@@ -5,7 +5,6 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { z } from 'zod'
 import { THREAD_FILTERS, TICKET_FILTERS, type Api, type ApiResponse, type RouteParams } from './api.ts'
-import { sourceSkills } from './context.ts'
 import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller/types'
 import { PromptConflict, SKILL_NAME, SKILL_PREFIX, TEAM_SECTIONS, builtInBase, builtInParts, defaultPrompts, savePrompts, type Prompts }
   from './prompts.ts'
@@ -14,7 +13,7 @@ import { SettingsConflict, type Settings } from './settings.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
 import { UserError, type EngineForPeople, type Ticket } from '../core/index.ts'
 import type { Deployment, Machine } from '../deployment.ts'
-import type { DshExecutor } from '../executor/dsh.ts'
+import type { HiFoxExecutor } from '../executor/hifox.ts'
 import type { Health } from '../sources/host.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
 import type { Sessions } from './sessions.ts'
@@ -46,7 +45,7 @@ export interface HttpHost {
   readonly sessions: Pick<Sessions, 'status' | 'notify' | 'delivery'>
   readonly settings: Pick<Settings, 'view' | 'save' | 'pause' | 'sync' | 'refreshLabels'>
   readonly engine: EngineForPeople
-  readonly executor: Pick<DshExecutor, 'activeCount'>
+  readonly executor: Pick<HiFoxExecutor, 'activeCount'>
   readonly health: Record<string, Health>
   readonly machine: Machine
   readonly masterId: string
@@ -55,7 +54,6 @@ export interface HttpHost {
   /** Resolved deployment; throws if read while waiting for setup (`!configured()`). */
   readonly deployment: Deployment
   readonly setupProblem?: SetupProblem | undefined
-  readonly feishuProblem?: SetupProblem | undefined
   hiFoxStatus?(): ({ state: 'unconfigured' } | {
     state: 'configured' | 'paused'; ingress: 'socket' | 'direct' | 'offline'; space: string
   }) & { listener: DingTalkListenerStatus }
@@ -115,21 +113,21 @@ function machineView({ stateDir, repositoryPath, hiFoxSettings, promptMaxChars, 
 function setupView(runtime: HttpHost) {
   const resolved = runtime.configured() ? runtime.deployment : undefined
   return {
-    machine: machineView(runtime.machine), problem: runtime.setupProblem ?? null, feishuProblem: runtime.feishuProblem ?? null,
-    accounts: resolved ? { repositoryPath: resolved.repositoryPath ?? null, feishu: resolved.feishu ? { appId: resolved.feishu.appId, brand: resolved.feishu.brand, botId: resolved.feishu.botId, name: resolved.feishu.name } : null } : null,
+    machine: machineView(runtime.machine), problem: runtime.setupProblem ?? null,
+    accounts: resolved ? { repositoryPath: resolved.repositoryPath ?? null } : null,
   }
 }
 /** Build the `/orchestrator/api/state` response consumed by the management panel and `scripts/dsh-superagent status` (`docs/006-deployment.md`). */
 export function stateView(runtime: HttpHost) {
   const settings = runtime.store.settings()
   return { setup: setupView(runtime), load: { ...executorLoad(runtime.store, runtime.executor.activeCount()),
-    maxWorkers: settings.executor.maxWorkers },
+    maxWorkers: 1 },
     hifox: runtime.hiFoxStatus?.() ?? { state: 'unconfigured' as const, listener: { state: 'unavailable' as const } },
     masterId: runtime.masterId, paused: settings.paused, health: runtime.health }
 }
 const views = (runtime: HttpHost): ViewHost => ({ store: runtime.store, sources: runtime.sources, links: runtime.links() })
 const setupState = (runtime: HttpHost): SetupState => ({ deployment: runtime.configured() ? runtime.deployment : undefined,
-  problem: runtime.setupProblem, feishuProblem: runtime.feishuProblem })
+  problem: runtime.setupProblem })
 export type StateView = ReturnType<typeof stateView>
 /** Builds a ticket's detail view; `environment` is empty while waiting for setup because it requires the resolved deployment. */
 function ticketPage(runtime: HttpHost, id: string) {
@@ -145,7 +143,7 @@ function promptsView(runtime: HttpHost, revision: number | undefined, offset: nu
   // built-in text changed since, the text they were edited from when known.
   const parts = Object.entries(builtInParts()).map(([key, part]) => ({ key, ...part, base: builtInBase(part.text) }))
   return { masterId: runtime.masterId, current: shown, defaults: defaultPrompts(), sections: TEAM_SECTIONS, skillName: SKILL_NAME.source,
-    builtin: Object.keys(sourceSkills), skillPrefix: SKILL_PREFIX, parts, defaultChanged: runtime.prompts.defaultChanged(shown.config),
+    builtin: [] as string[], skillPrefix: SKILL_PREFIX, parts, defaultChanged: runtime.prompts.defaultChanged(shown.config),
     ...runtime.sessions.status(), ...runtime.prompts.history(offset) }
 }
 export type PromptsView = ReturnType<typeof promptsView>
@@ -231,7 +229,7 @@ function routes(runtime: HttpHost): Routes {
     'POST dreaming/batches/:id/memory/correct': ({ params }) => runtime.dreaming.correctMemory(params.id, memory()),
     'GET state': () => stateView(runtime),
     'GET overview': () => overview(views(runtime), runtime.health, policyVersion(store.settings()),
-      executorLoad(store, runtime.executor.activeCount()), runtime.setupProblem ?? runtime.feishuProblem),
+      executorLoad(store, runtime.executor.activeCount()), runtime.setupProblem),
     'GET search': ({ query }) => search(views(runtime), query.q ?? '', runtime.sourceLinks),
     'GET sources': () => sourcesStatus(views(runtime), runtime.health, setupState(runtime)),
     'GET settings': () => settingsView(store, runtime.sources, runtime.health, setupState(runtime), runtime.machine.stateDir),

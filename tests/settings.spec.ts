@@ -1,8 +1,8 @@
 /** Concurrency, retry, and validation tests for settings saves, pause toggling, and policy synchronization. */
 import { afterEach, expect, it, vi } from 'vitest'
 import { UserError } from '../src/core/index.ts'
-import { Commands } from '../src/infra/commands.ts'
 import { Setup } from '../src/app/setup.ts'
+import { Commands } from '../src/infra/commands.ts'
 import { SettingsConflict } from '../src/app/settings.ts'
 import { startRuntime, type Host } from './fixtures/host.ts'
 
@@ -15,7 +15,7 @@ function deferred<T>() {
 }
 const model = { provider: 'worker-provider', model: 'worker-model' }
 
-it('refuses a save of a block that another save changed during its model or account check, and saves nothing of it', async () => {
+it('refuses a save of a block that another save changed during its model check, and saves nothing of it', async () => {
   h = await startRuntime()
   const { settings, store } = h.runtime
   const llm = (h.ctx as unknown as { llm: { resolveCallConfig: ReturnType<typeof vi.fn> } }).llm
@@ -28,17 +28,7 @@ it('refuses a save of a block that another save changed during its model or acco
   check.resolve(model)
   await expect(slow).rejects.toThrow(SettingsConflict)
   expect(store.settings().executor).toMatchObject({ maxWorkers: 2, model: executor.model })
-  // An account check that a save of the same Source outruns is refused the same way.
-  const accounts = deferred<void>()
-  vi.spyOn(Setup.prototype, 'checkAccounts').mockImplementationOnce(() => accounts.promise)
-  const feishu = settings.block('source:feishu')
-  const value = feishu.value as { enabled: boolean; config: Record<string, unknown> }
-  const moved = settings.save('source:feishu', { ...value, config: { ...value.config, cli: '/opt/bin/lark-other' } }, feishu.revision,
-    'panel')
-  await settings.save('source:feishu', { ...value, config: { ...value.config, directMessages: false } }, feishu.revision, 'panel')
-  accounts.resolve()
-  await expect(moved).rejects.toThrow(SettingsConflict)
-  expect(store.settings().sources.feishu!.config).toMatchObject({ cli: value.config.cli, directMessages: false })
+
 })
 
 it('refuses a Policy sync that a Policy save outran, reports it on sync:feishu, and keeps the save', async () => {

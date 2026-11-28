@@ -47,29 +47,31 @@ it('refuses a database older than schema 10 and asks for a new state directory',
 
 it('writes a schema 10 database in its current shape once, so nothing reads an older shape', () => {
   const path = join(directory, 'db.sqlite')
+  const actor = { source: 'github', id: 'alice' }
+  const keepMandate = (basis: object) => ({ ...mandate(basis), actor })
   const ticket = {
     id: 't1', title: 'Fix', decisionId: 'd1', state: 'open', assignments: [], summary: '', createdAt: '1', updatedAt: '2',
     // In schema 10, a GitHub Channel without a comment link marked a PR that the ticket opened.
     channels: [{ source: 'github', thread: 'github:8', address: { number: '8' } }, { source: 'github', thread: 'github:7', address: { number: '7', url: 'https://github.com/acme/widgets/pull/7#issuecomment-1' } }],
-    mandate: mandate({ chatId: 'oc_team', direct: false, member: 'ou_alice', mention: true }),
+    mandate: keepMandate({ chatId: 'oc_team', direct: false, member: 'ou_alice', mention: true }),
     inputs: [{ id: 'i1', kind: 'reopen', decisionId: 'd2', at: '3' }, { id: 'i2', kind: 'reopen', decisionId: 'd0', at: '0' },
       { id: 'i3', kind: 'trigger', triggerId: 'trig-2', at: '4' }, { id: 'i4', kind: 'trigger', triggerId: 'ci-1', at: '5' }], undelivered: ['i1'],
     meta: { sourceTriggerId: 'trig-1', triggerIds: ['trig-1', 'trig-2'], workspace: '/w/fix-1', name: 'fix-1', sessionId: 'worker-t1', assignment: 'Read trigger/trig-1.',
       prNumber: 7, prUrl: 'https://github.com/acme/widgets/pull/7', branch: 'agent/fix-1', deliveryError: 'offline', recovery: 2, worktreeName: 'fix', scope: 'small' },
   }
-  const imported = { ...ticket, id: 't2', state: 'ended', channels: [], inputs: [], undelivered: [], mandate: mandate({ legacyAuthority: 'thread_followup', followup: true }),
+  const imported = { ...ticket, id: 't2', state: 'ended', channels: [], inputs: [], undelivered: [], mandate: keepMandate({ legacyAuthority: 'thread_followup', followup: true }),
     meta: { sourceTriggerId: 'old', workspace: '/w/task-2', sessionId: 'worker-task-2', legacyPrompt: 'Read event/old' },
     ended: { at: '6', by: 'executor', reason: 'merged' } }
   // Ended with a person's message waiting, and with no execution or origin trigger.
   const waiting = { ...ticket, id: 't3', state: 'ended', channels: [], ended: { at: '6', by: 'human', reason: 'Not needed' }, inputs: [{ id: 'i5', kind: 'trigger', triggerId: 'trig-2', at: '7' }],
-    undelivered: ['i5'], mandate: mandate({ chatId: 'p2p', direct: true, member: 'ou_alice' }), meta: {} }
+    undelivered: ['i5'], mandate: keepMandate({ chatId: 'p2p', direct: true, member: 'ou_alice' }), meta: {} }
   const bare = { ...ticket, id: 't4', channels: [], inputs: [], undelivered: [], meta: undefined }
-  const reopened = { id: 'd2', threadKey: 'feishu:oc_team:om_1', triggerIds: ['trig-2'], kind: 'reopen', reason: 'follow-up', at: '3', ticketId: 't1', policyVersion: 'v1' }
-  const unavailable = { id: 'd3', threadKey: 'feishu:oc_team:om_1', triggerIds: ['trig-2'], kind: 'unavailable', reason: 'Assessment timed out', at: '5', policyVersion: 'v1' }
-  const triggers = [{ id: 'trig-2', source: 'feishu', threads: [{ source: 'feishu', id: 'oc_team:om_1' }], actor, human: true, at: '4', text: 'more', meta: {} },
+  const reopened = { id: 'd2', threadKey: 'github:7', triggerIds: ['trig-2'], kind: 'reopen', reason: 'follow-up', at: '3', ticketId: 't1', policyVersion: 'v1' }
+  const unavailable = { id: 'd3', threadKey: 'github:7', triggerIds: ['trig-2'], kind: 'unavailable', reason: 'Assessment timed out', at: '5', policyVersion: 'v1' }
+  const triggers = [{ id: 'trig-2', source: 'github', threads: [{ source: 'github', id: '7' }], actor, human: true, at: '4', text: 'more', meta: {} },
     { id: 'ci-1', source: 'github', threads: [{ source: 'github', id: '7' }], actor: { source: 'github', id: 'ci' }, human: false, at: '5', text: 'CI', meta: {} }]
-  const decision = { id: 'd1', threadKey: 'feishu:oc_team:om_1', triggerIds: ['trig-1'], kind: 'accept', reason: '', at: '1', ticketId: 't1', policyVersion: 'v1',
-    mandate: mandate({ legacyAuthority: 'proactive_rule', observation: true, rules: ['copy'] }) }
+  const decision = { id: 'd1', threadKey: 'github:7', triggerIds: ['trig-1'], kind: 'accept', reason: '', at: '1', ticketId: 't1', policyVersion: 'v1',
+    mandate: keepMandate({ legacyAuthority: 'proactive_rule', observation: true, rules: ['copy'] }) }
   const evaluating = { id: 'e1', threadKey: 'github:5', triggerIds: ['x'], strength: 'inferred', actor, policyVersion: 'v1', startedAt: '', deadline: '',
     basis: { source: 'github', scope: { number: 5 }, row: 'issues', admission: 'listedUnaddressed', observation: true, mode: 'auto' } }
   const thread = { key: 'github:5', ref: { source: 'github', id: '5' }, createdAt: '', subscriptions: [], correlated: [], pending: [], evaluating, meta: {} }
@@ -108,7 +110,8 @@ it('writes a schema 10 database in its current shape once, so nothing reads an o
   const [current, , second, first] = store.settingsHistory()
   expect(current).toMatchObject({ revision: 4, source: 'internal', settings })
   expect(store.get('settings')).toBeUndefined()
-  expect(first).toMatchObject({ source: 'panel', settings: { sources: { feishu: { config: { chats: [{ chatId: 'oc_team', listen: 'mentions' }] } } } } })
+  expect(first).toMatchObject({ source: 'panel' })
+  expect(first?.settings.sources).not.toHaveProperty('feishu')
   expect(second).toMatchObject({ source: 'tool', settings: { sources: { 'github-issue': { enabled: true } } } })
   expect(store.get('prompt-version:1')).toMatchObject({ legacy: { config: { guides: { release: 'Use guide/github and dsh-tag-feishu.' } } },
     config: { skills: { release: 'Use the github section and dsh-superagent-feishu.' } } })
@@ -177,7 +180,7 @@ it('keeps each message as a receipt of what became of it, with why one was dropp
   schema10(path, {})
   const db = new DatabaseSync(path)
   const message = (id: string, sent: number, fields: object = {}) => db.prepare('INSERT INTO outbox (id, value, sent) VALUES (?, ?, ?)')
-    .run(id, JSON.stringify({ id, channel: { source: 'feishu', thread: 'feishu:oc_1:om_1', address: {} }, text: id, kind: 'reply', attempts: 2,
+    .run(id, JSON.stringify({ id, channel: { source: 'dingtalk', thread: 'dingtalk:chat', address: {} }, text: id, kind: 'reply', attempts: 2,
       error: 'offline', nextAttemptAt: 1, ...fields }), sent)
   message('gone', 1, { dropped: { at: '2026-09-01T00:00:00.000Z', reason: 'The conversation can no longer receive messages' } })
   message('ignored', 1, { dropped: { at: '2026-09-02T00:00:00.000Z', reason: 'The Source no longer listens to this conversation' } })
@@ -188,7 +191,7 @@ it('keeps each message as a receipt of what became of it, with why one was dropp
   expect(store.read.droppedReplies().map(item => [item.id, item.dropped.reason])).toEqual([['ignored', 'channelIgnored'], ['gone', 'channelGone']])
   expect(['gone', 'sent', 'waiting'].map(id => store.replyStatus(id))).toEqual(['dropped', 'sent', 'pending'])
   // A receipt holds no attempts: the message that waits has a `reply` effect, which keeps the ones it had and counts on.
-  expect(store.receipts.get('waiting')).toEqual({ id: 'waiting', channel: { source: 'feishu', thread: 'feishu:oc_1:om_1', address: {} }, text: 'waiting',
+  expect(store.receipts.get('waiting')).toEqual({ id: 'waiting', channel: { source: 'dingtalk', thread: 'dingtalk:chat', address: {} }, text: 'waiting',
     kind: 'reply', status: 'pending' })
   expect(store.db.prepare('SELECT kind, key, attempts, error FROM effect').all()).toEqual([{ kind: 'reply', key: 'waiting', attempts: 2, error: 'offline' }])
   expect(store.db.prepare("SELECT name FROM pragma_table_xinfo('outbox')").all().map(row => row.name)).not.toContain('sent')
@@ -201,7 +204,7 @@ it('changes nothing when one step fails: the database stays at schema 10 as it w
     updatedAt: '2', mandate: mandate({ via: 'listed' }), meta: { sourceTriggerId: 'trig-1', workspace: '/w/fix-1' } }
   // The current settings must validate; an invalid value aborts the migration transaction.
   schema10(path, { settings: { executor: { maxWorkers: 'many' } } }, { ticket: [ticket] })
-  expect(() => new Store(path)).toThrow(/^The orchestrator database is unchanged at schema 10: its migration to schema 11 failed: the settings: /)
+  expect(() => new Store(path)).toThrow(/^The orchestrator database is unchanged at schema 10: its migration to schema 12 failed: the settings: /)
   const db = new DatabaseSync(path)
   expect(db.prepare("SELECT value FROM kv WHERE key='schema'").get()).toEqual({ value: '10' })
   expect(JSON.parse(String(db.prepare("SELECT value FROM ticket WHERE id='t1'").get()!.value))).toMatchObject({ meta: { workspace: '/w/fix-1' } })
@@ -241,7 +244,7 @@ const opened = (records: Record<string, unknown>) => {
 
 it('writes a prompt version saved before the team sections in them, keeping custom skills and archiving the original configuration', () => {
   const store = opened({ ...legacyPrompts(3, { notes: 'Call orchestrator_create_task with event_id, read event/<id>, follow guide/work and guide/release, load dsh-tag-github, cd "$DSH_TAG_DIR".' }) })
-  const prompts = new Prompts(store, () => 100000, () => undefined, () => true)
+  const prompts = new Prompts(store, () => 100000, () => undefined)
   const { config } = prompts.version(3)
   expect(config.communication).toBe(defaultPrompts().communication)
   expect(config.delivery).toBe(defaultPrompts().delivery)
@@ -262,7 +265,7 @@ it('writes saved team sections and skills under current names: earlier project n
     skills: { notes: 'Load dsh-freelancer-github; cd "$DSH_FREELANCER_DIR". List with orchestrator_tickets, then orchestrator_ticket_inspect.',
       routing: 'Accept with orchestrator_ticket_accept; stop with orchestrator_ticket_stop, never orchestrator_trigger_ignore.' } }
   const store = opened({ 'prompt-version:1': { revision: 1, previousRevision: 0, savedAt: '', source: 'web', config }, 'prompt-revision': 1, 'prompt-settings-text': 1 })
-  const { config: current } = new Prompts(store, () => 100000, () => undefined, () => true).current()
+  const { config: current } = new Prompts(store, () => 100000, () => undefined).current()
   expect(current.delivery).toBe('Merge with --repo $DSH_SUPERAGENT_GITHUB_REPOSITORY.')
   expect(current.skills.notes).toBe('Load dsh-superagent-github; cd "$DSH_SUPERAGENT_DIR". List with orchestrator_read tickets, then orchestrator_read ticket/<id>.')
   // The four routing tools are one.
@@ -273,7 +276,7 @@ it('writes saved team sections and skills under current names: earlier project n
 it('does not turn retired GitHub settings into active prompt instructions', () => {
   const before = { policy: { autoMergeLineLimit: 350, members: [{ name: 'Alice', feishuId: 'ou_alice', github: 'alice' }] } }
   const store = opened({ 'settings-before-9': before })
-  const prompts = new Prompts(store, () => 100000, () => undefined, () => true)
+  const prompts = new Prompts(store, () => 100000, () => undefined)
   expect(prompts.current()).toMatchObject({ revision: 0, config: defaultPrompts() })
   store.close()
 })
@@ -283,7 +286,7 @@ it('reads a current prompt version that does not read as the one before it, keep
   const store = opened({ 'prompt-revision': 2, 'prompt-settings-text': 1,
     'prompt-version:1': { revision: 1, previousRevision: 0, savedAt: '', source: 'web', config },
     'prompt-version:2': { revision: 2, previousRevision: 1, savedAt: '', source: 'web', config: { delivery: ['not text'] } } })
-  const prompts = new Prompts(store, () => 100000, () => undefined, () => true)
+  const prompts = new Prompts(store, () => 100000, () => undefined)
   expect(prompts.current()).toMatchObject({ revision: 2, config, legacy: { config: { delivery: ['not text'] } } })
   expect(prompts.history(0, 2).revisions.map(version => version.changed)).toEqual([['legacy'], []])
   store.close()
@@ -333,19 +336,18 @@ it('opens a database the last schema 10 build left, adds what this version keeps
   lastSchema10(path)
   const store = new Store(path)
   expect(store.get(KV.store.schema)).toBe(SCHEMA_VERSION)
-  expect(store.tickets.active().map(ticket => ticket.id)).toEqual(['t1'])
-  expect(store.read.subscribedThreads('feishu').map(thread => thread.key)).toEqual(['feishu:oc_team:om_1'])
-  expect(store.tickets.get('t1')).toMatchObject({ origin: { triggerId: 'trig-1' }, execution: { name: 'fix-1', directory: '/w/fix-1' },
-    mandate: { basis: { via: 'addressed', addressed: 'mention' } } })
-  expect(store.receipts.waiting().map(item => item.id)).toEqual(['reply-1'])
-  expect(store.db.prepare('SELECT kind, key, generation FROM effect ORDER BY seq').all()).toEqual([{ kind: 'relay', key: 'report:old', generation: 0 },
-    { kind: 'reply', key: 'reply-1', generation: 0 }])
+  expect(store.tickets.active()).toEqual([])
+  expect(store.triggers.get('trig-1')).toBeUndefined()
+  expect(store.read.subscribedThreads('feishu')).toEqual([])
+  expect(store.receipts.waiting()).toEqual([])
+  expect(store.db.prepare('SELECT kind, key, generation FROM effect ORDER BY seq').all())
+    .toEqual([{ kind: 'relay', key: 'report:old', generation: 0 }])
   expect(store.db.prepare('SELECT id FROM inbox').all()).toEqual([{ id: 'left-out' }])
   const migrated = store.tickets.get('t1')
   store.close()
   const again = new Store(path)
   expect(again.tickets.get('t1')).toEqual(migrated)
-  expect(again.db.prepare('SELECT COUNT(*) AS n FROM effect').get()).toEqual({ n: 2 })
+  expect(again.db.prepare('SELECT COUNT(*) AS n FROM effect').get()).toEqual({ n: 1 })
   again.close()
 })
 it('writes the Sources\' records in their current shape once, so no Source converts an earlier one when it reads it', () => {
@@ -384,10 +386,10 @@ it('writes the Sources\' records in their current shape once, so no Source conve
   }
   db.close()
   const store = new Store(path)
-  expect(store.get(KV.feishu.topics('oc_team'))).toEqual({ omt_old: '2026-09-01T00:00:00.000Z' })
-  expect(store.triggers.get('dm')!.channel!.address).toEqual({ chatId: 'oc_dm', messageId: 'om_1', direct: 'true' })
-  expect(store.receipts.waiting()[0]!.channel.address).toEqual({ chatId: 'oc_dm', messageId: 'om_1', direct: 'true' })
-  expect(store.threads.get('feishu:oc_team:om_9')!.meta.url).toBe('https://applink.feishu.cn/client/chat/open?openChatId=oc_team')
+  expect(store.get(KV.feishu.topics('oc_team'))).toBeUndefined()
+  expect(store.triggers.get('dm')).toBeUndefined()
+  expect(store.receipts.waiting()).toEqual([])
+  expect(store.threads.get('feishu:oc_team:om_9')).toBeUndefined()
   expect(store.triggers.get('issue')!.source).toBe('github')
   // The waiting mention within the polling horizon is read again; the older one is no fresh request.
   expect(store.get(KV.github.retries)).toEqual({ 12: { since: recent, pr: false } })
@@ -456,7 +458,7 @@ it('names the ticket it stopped at when a ticket does not read, and leaves the d
   const path = join(directory, 'db.sqlite')
   const { inputs: _inputs, ...broken } = ticket10('t9')
   schema10(path, {}, { ticket: [broken] })
-  expect(() => new Store(path)).toThrow(/^The orchestrator database is unchanged at schema 10: its migration to schema 11 failed: ticket t9: /)
+  expect(() => new Store(path)).toThrow(/^The orchestrator database is unchanged at schema 10: its migration to schema 12 failed: ticket t9: /)
   const db = new DatabaseSync(path)
   expect(db.prepare("SELECT value FROM kv WHERE key='schema'").get()).toEqual({ value: '10' })
   expect(JSON.parse(String(db.prepare("SELECT value FROM ticket WHERE id='t9'").get()!.value))).toEqual(broken)
@@ -477,7 +479,7 @@ it('makes the newest saved revision the current settings when it holds them, and
 it('reads the reasons a Trigger\'s filter and an Assignment\'s end stored in words as codes, and keeps an end\'s reason once', () => {
   const path = join(directory, 'db.sqlite')
   const assignment = (id: string, endedReason: string) => ({ id, ticketId: 't1', ref: '', state: 'ended', createdAt: '1', endedAt: '2', endedReason })
-  schema10(path, {}, { ticket: [ticket10('t1', { assignments: [assignment('a1', 'Retried by a person'), assignment('a2', 'host restarted'),
+  schema10(path, {}, { ticket: [ticket10('t1', { mandate: { ...mandate({ via: 'listed' }), actor: { source: 'github', id: 'alice' } }, assignments: [assignment('a1', 'Retried by a person'), assignment('a2', 'host restarted'),
     { id: 'a3', ticketId: 't1', ref: '', state: 'running', createdAt: '2' }] })] })
   const db = new DatabaseSync(path)
   db.prepare('INSERT INTO disposition VALUES (?, ?)').run('trig-1', JSON.stringify({ filtered: 'Sender is not an authorized human member', fanout: [], at: '' }))
@@ -492,19 +494,6 @@ it('reads the reasons a Trigger\'s filter and an Assignment\'s end stored in wor
   expect([ended.ended, ended.assignments[0]]).toEqual([{ at: '5', by: 'human', reason: 'Not needed', outcome: 'stopped' }, { id: 'a1', state: 'ended', createdAt: '1', endedAt: '5' }])
 })
 
-it('marks a ticket\'s Channel to a direct Feishu chat as direct, and links a Thread in the Lark brand when Lark links are stored', () => {
-  const path = join(directory, 'db.sqlite')
-  const dm = { source: 'feishu', thread: 'feishu:oc_dm', address: { chatId: 'oc_dm', messageId: 'om_1' } }
-  const lark = { id: 'lark', source: 'feishu', threads: [{ source: 'feishu', id: 'oc_team:om_2' }], actor, human: true, at: '2026-10-01T00:00:00.000Z',
-    text: 'hi', url: 'https://applink.larksuite.com/client/message/link/open?token=x', meta: {} }
-  schema10(path, { 'feishu-chats': { oc_dm: true } }, { ticket: [ticket10('t1', { channels: [dm] })], trigger: [lark],
-    thread: [{ key: 'feishu:oc_other:om_9', ref: { source: 'feishu', id: 'oc_other:om_9' }, createdAt: '', subscriptions: [], correlated: [], pending: [], meta: {} }] })
-  const store = new Store(path)
-  expect(store.tickets.get('t1')!.channels).toEqual([{ ...dm, address: { ...dm.address, direct: 'true' } }])
-  expect(store.threads.get('feishu:oc_other:om_9')!.meta.url).toBe('https://applink.larksuite.com/client/chat/open?openChatId=oc_other')
-  store.close()
-})
-
 it('delivers the candidate of an Eval in progress at the upgrade again, so its deadline starts and it can expire', () => {
   const path = join(directory, 'db.sqlite')
   const evaluating = { id: 'e9', threadKey: 'github:9', triggerIds: ['issue-9'], strength: 'explicit', actor, policyVersion: 'v1', startedAt: '1',
@@ -517,4 +506,48 @@ it('delivers the candidate of an Eval in progress at the upgrade again, so its d
   const effects = store.db.prepare("SELECT key, value FROM effect WHERE kind = 'assessment'").all().map(row => [row.key, JSON.parse(String(row.value))])
   expect(effects).toEqual([['e9', { triggerId: 'issue-9' }]])
   store.close()
+})
+
+it('upgrades schema 11 by purging Feishu work and retaining the original HiFox dispatch and backoff', () => {
+  const path = join(directory, 'db.sqlite')
+  const old = new Store(path)
+  const at = '2026-11-28T00:00:00.000Z'
+  const save = (source: 'feishu' | 'dingtalk') => {
+    const ref = { source, id: 'chat' }
+    const actor = { source, id: 'alice' }
+    const channel = { source, thread: `${source}:chat`, address: { messageId: 'msg' } }
+    old.triggers.save({ id: source, source, threads: [ref], channel, actor, human: true, at, text: 'Fix it', meta: {} })
+    old.threads.save({ key: channel.thread, ref, createdAt: at, subscriptions: [source], pending: [], correlated: [], meta: {} })
+    old.tickets.save({ id: source, title: 'Fix it', decisionId: source, createdAt: at, updatedAt: at,
+      channels: [channel], origin: { triggerId: source, triggerIds: [source] },
+      mandate: { actor, basis: { via: 'listed' }, strength: 'explicit', scope: 'Fix it', policyVersion: 'v' },
+      inputs: [], undelivered: [], assignments: [{ id: `assignment-${source}`, createdAt: at, state: 'running' }],
+      ...(source === 'dingtalk' ? { executionTarget: 'hifox', hiFoxAgent: { space: 'space', agentId: 'agent' } } : {}),
+    })
+    old.db.prepare('INSERT INTO effect (kind, key, value, seq, due, since) VALUES (?, ?, ?, ?, ?, ?)')
+      .run('launch', `assignment-${source}`, JSON.stringify({ ticketId: source }), source === 'feishu' ? 1 : 2, 0, at)
+  }
+  save('feishu')
+  save('dingtalk')
+  old.saveSettings({ sources: { feishu: { enabled: true, config: { cli: 'old' } }, dingtalk: { enabled: true, config: {} } } })
+  const binding = { taskUuid: 'original-card', attempts: { 'assignment-dingtalk': { receipt: { runId: 'original-run' } } } }
+  old.set('hifox-binding:dingtalk', binding)
+  old.set('hifox-active-run', { ticketId: 'dingtalk', assignmentId: 'assignment-dingtalk' })
+  old.db.prepare('INSERT INTO effect (kind, key, value, seq, attempts, due, since) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run('hifox', 'dingtalk', '{"ticketId":"dingtalk"}', 3, 2, 42, at)
+  old.set(KV.store.schema, 11)
+  old.close()
+
+  const upgraded = new Store(path)
+  expect(upgraded.get(KV.store.schema)).toBe(12)
+  expect(upgraded.triggers.get('feishu')).toBeUndefined()
+  expect(upgraded.threads.get('feishu:chat')).toBeUndefined()
+  expect(upgraded.tickets.get('feishu')).toBeUndefined()
+  expect(upgraded.settingsHistory()[0]!.settings.sources).toEqual({ dingtalk: { enabled: true, config: {} } })
+  expect(upgraded.tickets.get('dingtalk')?.assignments[0]).toMatchObject({ id: 'assignment-dingtalk', state: 'running' })
+  expect(upgraded.get('hifox-binding:dingtalk')).toEqual(binding)
+  expect(upgraded.get('hifox-active-run')).toMatchObject({ ticketId: 'dingtalk' })
+  expect(upgraded.db.prepare('SELECT kind, key, attempts, due FROM effect').all())
+    .toEqual([{ kind: 'hifox', key: 'dingtalk', attempts: 2, due: 42 }])
+  upgraded.close()
 })

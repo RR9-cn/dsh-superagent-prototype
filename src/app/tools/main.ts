@@ -5,7 +5,7 @@ import { z } from 'zod'
 import { UserError, followupOwners, key, reasonText, type Decision, type DecisionKind, type EngineForMainSession, type EngineForPeople }
   from '../../core/index.ts'
 import { IM_WORDS, NOTE_WORDS, wordCount } from '../../infra/text.ts'
-import { AssessmentSchema, EvalReadSchema, WorktreeNameSchema, type MasterAssessor } from '../assessment.ts'
+import { AssessmentSchema, EvalReadSchema, type MasterAssessor } from '../assessment.ts'
 import { ticketCard } from '../cards.ts'
 import { PromptConfigSchema, savePrompts, type Prompts } from '../prompts.ts'
 import { readResource, type MainResourceHost, type ResourceHost } from '../resources.ts'
@@ -54,7 +54,7 @@ const RouteItemSchema = z.object({
   trigger_id: z.string().describe('The candidate card\'s trigger_id; deciding it decides its batch.'),
   ticket_id: z.string().nullish().describe('attach and stop: the ticket.'),
   title: z.string().nullish().describe('accept: a short label of at most 200 characters describing the original request; no added requirements or implementation advice.'),
-  worktree_name: z.string().nullish().describe(`accept outside the DingTalk pilot: ${WorktreeNameSchema.description ?? ''}`),
+  worktree_name: z.string().nullish().describe('Deprecated. HiFox selects its execution environment.'),
   acknowledgement: z.string().nullish().describe(`accept: one brief sentence of at most ${IM_WORDS} words naming the concrete change and intended result in the source language. It is posted as a reply to the original source on acceptance, so do not quote the source; quote an earlier proposal briefly only when the trigger merely confirms it and the sentence does not already state it. No generic I will handle it.`),
   note: z.string().nullish().describe(`accept and attach: ${RoutingNoteSchema.description ?? ''}`),
   reason: z.string().nullish().describe('ignore, manual and stop: why, at most 500 characters; ignore and manual need it.'),
@@ -68,7 +68,7 @@ type Field = Exclude<keyof RouteItem, 'kind' | 'trigger_id'>
 const FIELDS: Record<Field, { check: z.ZodType; reads: readonly Kind[]; needs: readonly Kind[] }> = {
   ticket_id: { check: z.string(), reads: ['attach', 'stop'], needs: ['attach', 'stop'] },
   title: { check: z.string().max(200), reads: ['accept'], needs: ['accept'] },
-  worktree_name: { check: WorktreeNameSchema, reads: ['accept'], needs: ['accept'] },
+  worktree_name: { check: z.string(), reads: [], needs: [] },
   acknowledgement: { check: AcknowledgementSchema, reads: ['accept'], needs: ['accept'] },
   note: { check: RoutingNoteSchema, reads: ['accept', 'attach'], needs: [] },
   reason: { check: z.string().max(500), reads: ['ignore', 'stop', 'manual'], needs: ['ignore', 'manual'] },
@@ -76,13 +76,10 @@ const FIELDS: Record<Field, { check: z.ZodType; reads: readonly Kind[]; needs: r
   hifox_agent_reason: { check: z.string().max(500), reads: ['accept'], needs: ['accept'] },
 }
 /** Why an item cannot run: a field its kind needs is missing, or one it reads breaks its limit. */
-function invalid(host: MainToolsHost, item: RouteItem): string | undefined {
-  const trigger = host.store.triggers.get(item.trigger_id)
-  const dingTalk = trigger?.source === DINGTALK
+function invalid(item: RouteItem): string | undefined {
   for (const [field, { check, reads, needs }] of Object.entries(FIELDS) as [Field, typeof FIELDS[Field]][]) {
     const value = item[field]
     if (!reads.includes(item.kind)) continue
-    if ((field === 'worktree_name' && dingTalk) || (field.startsWith('hifox_') && !dingTalk)) continue
     if (value === undefined || value === null || value.trim() === '') {
       if (needs.includes(item.kind)) return `${item.kind} needs ${field}`
       continue
@@ -120,24 +117,25 @@ async function route(host: MainToolsHost, item: RouteItem, decided: ReadonlyMap<
   if (earlier && (item.kind === 'ignore' || item.kind === 'manual')) return { refused: `Decided in this call with ${earlier}, whose Decision took its batch` }
   switch (item.kind) {
     case 'accept': {
+      if (!dingTalk) return { refused: 'New tickets require an admitted DingTalk request and a HiFox Agent.' }
       const before = host.store.triggers.disposition(item.trigger_id)?.decisionId
-      const recorded = dingTalk && before ? host.store.decisions.get(before) : undefined
+      const recorded = before ? host.store.decisions.get(before) : undefined
       if (recorded?.kind === 'accept' && recorded.ticketId) return {
         decision: 'accept', reason: `Already accepted as ${recorded.ticketId}`, ticketId: recorded.ticketId,
       }
-      const evalId = dingTalk ? host.engine.candidate(item.trigger_id)?.evalId : undefined
-      if (dingTalk && !evalId) return { refused: 'DingTalk routing requires an active candidate.' }
-      const roster = dingTalk ? await host.hiFoxAgents?.(item.trigger_id, signal) : undefined
+      const evalId = host.engine.candidate(item.trigger_id)?.evalId
+      if (!evalId) return { refused: 'DingTalk routing requires an active candidate.' }
+      const roster = await host.hiFoxAgents?.(item.trigger_id, signal)
       const agent = roster?.agents.find(entry => entry.id === item.hifox_agent_id)
-      if (dingTalk && (!roster || !agent)) return { refused: 'The selected HiFox Agent is unavailable in this Space. Refresh the roster or record a manual routing decision.' }
-      const quotedId = dingTalk ? dingTalkMeta(trigger?.meta)?.quotedMessageId : undefined
+      if (!roster || !agent) return { refused: 'The selected HiFox Agent is unavailable in this Space. Refresh the roster or record a manual routing decision.' }
+      const quotedId = dingTalkMeta(trigger?.meta)?.quotedMessageId
       const context = quotedId ? await host.dingTalkContext?.(item.trigger_id, signal) : undefined
       const quote = QuotedMessageSchema.safeParse(context?.quoted_message).data
-      const selection = roster && agent ? { hiFoxAgent: { space: roster.space, agentId: agent.id, agentName: agent.name },
+      const selection = { hiFoxAgent: { space: roster.space, agentId: agent.id, agentName: agent.name },
         ...(quote && quote.message_id === quotedId ? { hiFoxQuote: { messageId: quote.message_id, text: quote.text } } : {}),
-        audit: { hiFoxAgentId: agent.id, hiFoxRouteReason: item.hifox_agent_reason } } : {}
+        audit: { hiFoxAgentId: agent.id, hiFoxRouteReason: item.hifox_agent_reason } }
       const decision = host.engine.decide(item.trigger_id, { kind: 'accept', title: item.title!, scope: item.title!, reason: { code: 'explicitRouted' },
-        acknowledgement: item.acknowledgement!, ...(!dingTalk && item.worktree_name ? { name: item.worktree_name } : {}), ...note, ...selection,
+        acknowledgement: item.acknowledgement!, ...note, ...selection,
         ...(evalId ? { evalId } : {}) })
       // A Decision that created no ticket is the item's refusal; one that existed before keeps what it was accepted with.
       if (decision.kind !== 'accept' || !decision.ticketId) return { refused: `Ticket was not created: ${reasonText(decision.reason)}` }
@@ -179,7 +177,7 @@ function routeTool(host: MainToolsHost): Tool {
       const decided = new Map<string, string>()
       const run = async (item: RouteItem) => {
         const head = { trigger_id: item.trigger_id, kind: item.kind }
-        const problem = invalid(host, item)
+        const problem = invalid(item)
         if (problem) return { ...head, refused: problem }
         try {
           const result = await route(host, item, decided, signal)
@@ -225,15 +223,6 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
       description: 'Start a new assignment on an explicit human request to retry a ticket whose worker reported failed or blocked, or whose input was not delivered; the stalled one ends.',
       schema: z.object({ ticket_id: z.string() }).strict(),
       execute: async args => routed(host, { reason: 'Started a new assignment', ticketId: host.engine.retryTicket(args.ticket_id).id }),
-    }),
-    tool({
-      name: 'orchestrator_ticket_request_status',
-      description: 'Ask the worker of an idle ticket, one whose turn ended without a report, for a status report; for other tickets it sends nothing and returns the card.',
-      schema: z.object({ ticket_id: z.string() }).strict(),
-      execute: async args => {
-        const reason = host.engine.requestStatus(args.ticket_id) ? 'Asked the worker for a status report' : 'The worker is not waiting; nothing was sent'
-        return routed(host, { reason, ticketId: args.ticket_id })
-      },
     }),
     tool({
       name: 'orchestrator_ticket_note',

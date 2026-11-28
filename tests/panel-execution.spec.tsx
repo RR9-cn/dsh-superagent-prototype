@@ -41,7 +41,7 @@ it('lists Tickets under Execution by who they wait on, with the Executor state a
   await click(find(zh['tab.settings'], '.dt-status-head button'))
   expect(tab(zh['tab.settings']).getAttribute('aria-selected')).toBe('true')
   expect(document.querySelector('.dt-settings-link[aria-current="page"]')?.textContent).toBe(zh['promptPart.runtime/work'])
-  await type(field<HTMLInputElement>(zh.maxWorkers), '4')
+  await type(field<HTMLInputElement>(zh.blockedCommands), 'local-command')
   await click(tab(zh['tab.execution']))
   await click(zh.pauseProcessing)
   await click(zh.confirm)
@@ -50,7 +50,7 @@ it('lists Tickets under Execution by who they wait on, with the Executor state a
   expect(find(zh.resumeProcessing).textContent).toBe(zh.resumeProcessing)
   await click(tab(zh['tab.settings']))
   await click(zh.save)
-  expect(server.settings).toMatchObject({ paused: true, executor: { maxWorkers: 4 } })
+  expect(server.settings).toMatchObject({ paused: true, executor: { blockedCommands: ['local-command'] } })
 })
 
 it('stops an open Ticket from its page after confirmation', async () => {
@@ -136,20 +136,15 @@ it('keeps what a person types in the Execution settings, converting it once on s
   await mount()
   await click(zh['tab.execution'])
   await click(find(zh['tab.settings'], '.dt-status-head button'))
-  const blocked = () => field<HTMLInputElement>(zh.blockedCommands), root = () => field<HTMLInputElement>(zh.executionDirectory),
-    workers = () => field<HTMLInputElement>(zh.maxWorkers)
-  // A separator typed before the next command, a space inside a path and a cleared number stay as typed.
+  const blocked = () => field<HTMLInputElement>(zh.blockedCommands)
   await type(blocked(), 'gh-personal ')
   expect(blocked().value).toBe('gh-personal ')
   await type(blocked(), 'gh-personal, gh-other')
-  await type(root(), '/srv/my work ')
-  expect(root().value).toBe('/srv/my work ')
-  await type(workers(), '')
-  expect(workers().value).toBe('')
-  await type(workers(), '2')
   await click(zh.save)
-  expect(server.requests.find(request => request.path === 'settings/executor')?.body).toMatchObject({ value: { blockedCommands: ['gh-personal', 'gh-other'], directory: '/srv/my work ', maxWorkers: 2 } })
-  expect(server.settings.executor).toMatchObject({ blockedCommands: ['gh-personal', 'gh-other'], directory: '/srv/my work', maxWorkers: 2 })
+  expect(server.requests.find(request => request.path === 'settings/executor')?.body)
+    .toMatchObject({ value: { blockedCommands: ['gh-personal', 'gh-other'] } })
+  expect(server.settings.executor.blockedCommands).toEqual(['gh-personal', 'gh-other'])
+
 })
 
 it('says why an Input was not delivered on its Ticket\'s page, in either language', async () => {

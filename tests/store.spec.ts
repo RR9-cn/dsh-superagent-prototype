@@ -136,7 +136,7 @@ it('spells every kv key in KV alone, so each record is named by its entry there'
   // Ignore single-word keys that collide with unrelated string literals.
   const keys = entries.map(entry => typeof entry === 'string' ? entry : entry.prefix).filter(name => /[-:]/.test(name))
   const modules = readdirSync(src, { recursive: true, encoding: 'utf8' })
-    .filter(path => /\.tsx?$/.test(path) && !['kv.ts', join('app', 'migration.ts')].includes(path))
+    .filter(path => /\.tsx?$/.test(path) && !['kv.ts', join('app', 'migration.ts'), join('app', 'retire-feishu.ts')].includes(path))
   const spelled = modules.flatMap(path => {
     const text = readFileSync(join(src, path), 'utf8')
     return keys.filter(name => text.includes(`'${name}`) || text.includes(`\`${name}`)).map(name => `${path}: ${name}`)

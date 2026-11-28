@@ -115,7 +115,8 @@ it('renders the Deployment page with the derived accounts in the Plugin Manager,
   expect(container.textContent).toBe('')
   server.form = fakeForm().form
   await render('page')
-  for (const fact of ['/srv/src/widgets', 'Widgets Bot']) expect(text()).toContain(fact)
+  expect(text()).toContain('/srv/src/widgets')
+  expect(text()).not.toContain('Widgets Bot')
   server.setup = { ...server.setup, problem: problemOf('environmentFailed'), accounts: null }
   await render('page')
   expect(text()).toContain('部署检查未通过')

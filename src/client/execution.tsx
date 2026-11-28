@@ -1,15 +1,13 @@
-/** Execution status view (active Tickets and pause control) and Execution settings group (Executor capacity and workspace environment). */
-import { useRef, useState } from 'react'
+/** Execution status view (active Tickets and pause control) and Execution settings group (managed shell settings). */
+import { useState } from 'react'
 import { TICKET_FILTERS, type TicketFilter } from '../app/api.ts'
-import { LIMITS } from '../limits.ts'
-import { usePoll, type SettingsView, type SourceView, type StateView } from './api.ts'
-import { DisclosureRow, Icon, InfoTip, Input, Pill } from './controls.tsx'
+import { usePoll, type StateView } from './api.ts'
+import { Input, Pill } from './controls.tsx'
 import { SaveBar } from './draft.tsx'
 import { usePanel } from './provider.tsx'
 import { TicketLine } from './rows.tsx'
-import { ConfigHistory, Field, Fields, ModelField, numberOf, useBlockDraft, useSettings } from './settings-kit.tsx'
-import { localized } from './text.ts'
-import { ConfirmButton, Hint, LabelValue, LoadMore, LoadState, Section, StatusHead } from './widgets.tsx'
+import { ConfigHistory, Field, Fields, useBlockDraft, useSettings } from './settings-kit.tsx'
+import { ConfirmButton, Hint, LabelValue, LoadMore, LoadState, StatusHead } from './widgets.tsx'
 
 export function ExecutionStatus({ filter: current, state, reload }: {
   filter: TicketFilter; state: StateView; reload: () => Promise<void>
@@ -50,75 +48,20 @@ export function ExecutionStatus({ filter: current, state, reload }: {
   </>
 }
 
-const firstSentence = (text: string): string => /^[^。；;.]*(?:[。；;]|\.(?=\s|$))?/.exec(text)?.[0] ?? text
-function EnvironmentVariables({ groups, sources,
-  onPick }: { groups: SettingsView['environment']['variables']; sources: SourceView[]; onPick: (key: string) => void }) {
-  const { t } = usePanel()
-  const [open, setOpen] = useState(false)
-  const owner = (id: string) => id === 'executor' ? t('term.executor') : localized(t, sources.find(source => source.id === id)?.title ?? id)
-  const count = groups.reduce((sum, group) => sum + group.variables.length, 0)
-  return <DisclosureRow icon={<Icon name="hash" />} title={<>{t('environmentVariables')} <span className="dt-count">{count}</span></>}
-    open={open} onToggle={() => setOpen(!open)}>
-    <div className="dt-disclosure-body">
-      <Hint>{t('environmentPick')}</Hint>
-      <table className="dt-table">
-        <thead><tr><th>{t('environmentKey')}</th><th>{t('environmentDescription')}</th><th>{t('environmentOwner')}</th></tr></thead>
-        <tbody>{groups.flatMap(group => group.variables.map(variable => <tr key={variable.key}>
-          <td><button type="button" className="dt-textlink dt-mono" onClick={() => onPick(variable.key)}>{variable.key}</button></td>
-          <td title={localized(t, variable.description)}>{firstSentence(localized(t, variable.description))}</td>
-          <td>{owner(group.owner)}{!group.enabled && <span className="dt-hint"> · {t('sourceOff')}</span>}</td>
-        </tr>))}</tbody>
-      </table>
-    </div>
-  </DisclosureRow>
-}
 export function ExecutionSettings() {
   const { t } = usePanel()
-  const { blocks, environment, sources } = useSettings().settings
-  // Keep raw user text (such as separators between blocked commands) in the draft and parse only on save.
+  const { blocks } = useSettings().settings
   const executor = blocks.executor.value
-  const saved = { ...executor, maxWorkers: String(executor.maxWorkers), blockedCommands: executor.blockedCommands.join(' ') }
+  const saved = { blockedCommands: executor.blockedCommands.join(' ') }
   const draft = useBlockDraft('executor', saved, blocks.executor.revision,
-    value => ({ ...value, maxWorkers: numberOf(value.maxWorkers), blockedCommands: value.blockedCommands.split(/[\s,]+/).filter(Boolean) }))
-  const value = draft.value
-  const edit = (next: Partial<typeof value>) => draft.edit({ ...value, ...next })
-  const prepare = useRef<HTMLTextAreaElement>(null)
-  const insert = (key: string) => {
-    const field = prepare.current
-    const at = field?.selectionStart ?? value.prepare.length, to = field?.selectionEnd ?? at
-    edit({ prepare: `${value.prepare.slice(0, at)}"$${key}"${value.prepare.slice(to)}` })
-    requestAnimationFrame(() => { field?.focus(); const caret = at + key.length + 3; field?.setSelectionRange(caret, caret) })
-  }
+    value => ({ ...executor, blockedCommands: value.blockedCommands.split(/[\s,]+/).filter(Boolean) }))
   return <div className="dt-form">
     <form className="dt-form" onSubmit={event => { void draft.submit(event) }}>
       <Fields disabled={draft.busy}>
-        <div className="dt-form dt-block">
-          <h2 className="dt-block-title">{t('term.executor')}<InfoTip text={t('executorIntro')} /></h2>
-          <Section title={t('executorModel')} hint={t('executorModelHint')}><ModelField id="dt-worker-model" value={value.model}
-            onChange={model => edit({ model })} /></Section>
-          <Field label={t('maxWorkers')} hint={t('maxWorkersHint')}>
-            <Input type="number" min={LIMITS.maxWorkers.min} max={LIMITS.maxWorkers.max} required value={value.maxWorkers}
-              onChange={event => edit({ maxWorkers: event.target.value })} />
-          </Field>
-        </div>
-        <div className="dt-form dt-block">
-          <h2 className="dt-block-title">{t('term.environment')}<InfoTip text={t('environmentIntro')} /></h2>
-          <Field label={t('executionDirectory')} hint={t('executionDirectoryHint')} note={value.directory ? undefined
-            : t('executionDirectoryDefault', { root: environment.root })}>
-            <Input className="dt-mono" value={value.directory} placeholder={t('executionDirectoryEmpty')} spellCheck={false} pattern="/.*"
-              onChange={event => edit({ directory: event.target.value })} />
-          </Field>
-          <Field label={t('prepareCommand')} hint={t('prepareCommandHint')}>
-            <textarea ref={prepare} className="dt-textarea dt-mono" rows={3} maxLength={LIMITS.prepareCommand} spellCheck={false}
-              placeholder={t('prepareCommandEmpty')} value={value.prepare}
-              onChange={event => edit({ prepare: event.target.value })} />
-          </Field>
-          <EnvironmentVariables groups={environment.variables} sources={sources} onPick={insert} />
-          <Field label={t('blockedCommands')} hint={t('blockedCommandsHint')}>
-            <Input className="dt-mono" value={value.blockedCommands} placeholder={t('blockedCommandsNone')} spellCheck={false}
-              onChange={event => edit({ blockedCommands: event.target.value })} />
-          </Field>
-        </div>
+        <Field label={t('blockedCommands')} hint={t('blockedCommandsHint')}>
+          <Input className="dt-mono" value={draft.value.blockedCommands} placeholder={t('blockedCommandsNone')} spellCheck={false}
+            onChange={event => draft.edit({ blockedCommands: event.target.value })} />
+        </Field>
       </Fields>
       <SaveBar {...draft} onDiscard={draft.discard} />
     </form>
