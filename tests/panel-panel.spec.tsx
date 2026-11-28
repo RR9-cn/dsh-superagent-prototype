@@ -7,93 +7,37 @@ import { usePanel, mount, remount, settle, all, click, type, text, field, find }
 import { server, found } from './fixtures/panel-server.ts'
 
 usePanel()
-it('shows the two exact URIs and waits for explicit duplicate deletion confirmation', async () => {
-  const base = 'viking://~/memories/experiences/'
-  const pair = { id: 'duplicate', keep: { uri: base + 'test_setup.md', digest: 'new' },
-    remove: { uri: base + 'test setup.md', digest: 'old' }, reason: 'revised' as const, query: 'Test setup',
-    obsolete: ['Switch to the wrapper.'], status: 'proposed' as const }
-  server.dreaming = { mode: 'dsh', openViking: true, canStart: true, pack: null, published: null, bulk: null, batches: [],
-    duplicates: { ids: [pair.id], pairs: [pair], total: 2, skipped: [], unavailable: [] } }
-  await mount()
-  await click(zh['tab.dreaming'])
-  expect(text()).toContain(pair.keep.uri)
-  expect(text()).toContain(pair.remove.uri)
-  await click(zh['dreaming.duplicateReview'])
-  expect(server.requests.some(r => r.path.endsWith('/remove'))).toBe(false)
-  await click(zh['dreaming.duplicateConfirm'])
-  expect(server.requests.filter(r => r.path.endsWith('/remove'))).toEqual([
-    { path: 'dreaming/duplicates/duplicate/remove', method: 'POST' },
-  ])
-  expect(text()).toContain(zh['dreaming.duplicateStatus.verified'])
-})
-
-it('keeps automatic merge results collapsed without a confirmation control', async () => {
+it.each([undefined, 2])('shows only the completed daily Dreaming result (merges: %s)', async merged => {
   const root = 'viking://~/memories/experiences/'
-  const keep = { uri: root + 'test_setup.md', digest: 'keep', content: 'Configuration from the project root.' }
-  const source = { uri: root + 'test setup.md', digest: 'source', content: 'Logs show the resolved configuration file.' }
-  server.dreaming = { mode: 'dsh', openViking: true, canStart: true, pack: null, published: null, bulk: null, batches: [],
-    merges: [{ id: 'pending', keep, source, status: 'proposed' }] }
+  const keep = { uri: root + 'test_setup.md', digest: 'new', content: 'Configuration from the project root.' }
+  const source = { uri: root + 'test setup.md', digest: 'old', content: 'Logs show the resolved configuration file.' }
+  server.dreaming = { mode: 'dsh', openViking: true, canStart: true, pack: null, published: null,
+    batches: [{ id: 'previous', baseVersion: 0, pack: { id: 'archive', project: 'example', archiveUri: 'legacy-archive',
+      evidence: [] }, createdAt: '2026-11-25T08:00:00Z', attempt: 1, model: null, sessionId: 'legacy-session',
+    status: 'no_change', observation: 'Legacy archive result' }],
+    bulk: { total: 85, queued: 85, existing: 0, skipped: [], unavailable: [], archiveTotal: 25 },
+    merges: [{ id: 'historical', keep, source, status: 'verified' }],
+    maintenance: { active: false, finishedAt: '2026-11-26T18:05:00.000Z', revised: 13, removed: 0, unresolved: 5,
+      merged, nextAt: '2026-11-27T18:00:00.000Z' } }
   await mount()
   await click(zh['tab.dreaming'])
-  const list = find(zh['dreaming.mergeResults'].replace('{count}', '1'), 'summary')
-  const item = find(`test_setup.md · ${zh['dreaming.mergeStatus.proposed']}`, 'summary')
-  expect(list.closest('details')?.open).toBe(false)
-  expect(item.closest('details')?.open).toBe(false)
-  await click(list)
-  await click(item)
-  expect(text()).toContain(source.uri)
-  expect(item.closest('details')?.querySelector('button')).toBeNull()
-  expect(server.requests.some(request => request.path.includes('/merges/'))).toBe(false)
+  const result = find(zh['dreaming.dailyResults'], 'h2').closest('section')!
+  const date = new Date('2026-11-27T12:00:00Z').toLocaleDateString(undefined, { timeZone: 'UTC' })
+  const summary = merged === undefined ? '已核验 13 条修正、0 条删除。' : '已核验 13 条修正、2 组合并、0 条删除。'
+  expect([...result.querySelectorAll('p')].map(item => item.textContent)).toEqual([
+    `完成日期 ${date}（北京时间）`, summary,
+  ])
+  expect(result.closest('[role="tabpanel"]')?.querySelector('details, button')).toBeNull()
+  expect(server.requests.filter(request => request.path.startsWith('dreaming'))).toEqual([{ method: 'GET', path: 'dreaming' }])
 })
 
-it('starts one-click correction directly and keeps manual editing available separately', async () => {
-  server.dreaming = { mode: 'dsh', openViking: true, canStart: true, pack: null, published: null, bulk: null, batches: [{
-    id: 'batch-1', baseVersion: 0, pack: { id: 'evidence', project: 'example', evidence: [
-      { id: 'root', source: 'viking://~/sessions/test/history/archive_001/messages.jsonl#L42', kind: 'tool-result', text: 'The test ran.' },
-    ] }, createdAt: '2026-11-25T08:00:00Z',
-    attempt: 1, model: null, sessionId: 'dreaming-session', status: 'published', candidate: { before: null, review: 'approved',
-      reason: 'Verified with the current setup', after: { title: 'Test setup', action: 'Check the directory', scope: 'example',
-        verification: 'The test ran at the root', support: ['root'], counterexamples: [] } },
-  }] }
-  const uri = 'viking://~/memories/experiences/test-setup.md'
-  server.dreamingMemoryMatches = [{ uri, excerpt: 'Original test setup' }]
+it.each([false, true])('shows the Dreaming status until an automatic run completes (active: %s)', async active => {
+  server.dreaming = { mode: 'dsh', canStart: true, pack: null, published: null, batches: [], bulk: null,
+    maintenance: { active, revised: 0, removed: 0, unresolved: 0, nextAt: undefined } }
   await mount()
   await click(zh['tab.dreaming'])
-  expect(server.requests.some(request => request.path === 'dreaming/archives')).toBe(false)
-  const results = find(zh['dreaming.auditResults'].replace('{count}', '1'), 'summary')
-  const group = results.closest('details')!
-  expect(group.open).toBe(false)
-  const result = find(zh['dreaming.published'], 'summary')
-  const details = result.closest('details')!
-  expect(group.contains(details)).toBe(true)
-  await click(results)
-  expect(group.open).toBe(true)
-  expect(details.open).toBe(false)
-  expect(details.textContent).toContain('Verified with the current setup')
-  expect(find(zh['dreaming.writeMemory']).closest('details')).toBe(details)
-  await click(result)
-  expect(details.open).toBe(true)
-  const evidence = find(zh['dreaming.evidenceDetails'], 'summary').closest('details')!
-  expect(evidence.open).toBe(false)
-  expect(evidence.textContent).toContain('messages.jsonl#L42')
-  expect(evidence.textContent).not.toContain(zh['dreaming.counterexamples'])
-  await click(zh['dreaming.writeMemory'])
-  expect(server.requests.filter(request => request.path.endsWith('/memory/correct'))).toEqual([
-    { path: 'dreaming/batches/batch-1/memory/correct', method: 'POST' },
-  ])
-  const open = find(zh['dreaming.manualMemory'])
-  expect(open.getAttribute('aria-expanded')).toBe('false')
-  expect(text()).toContain(zh['dreaming.published'])
-  expect(server.requests.some(request => request.path.endsWith('/memory/find'))).toBe(false)
-  await click(open)
-  expect(open.getAttribute('aria-expanded')).toBe('true')
-  expect(field<HTMLInputElement>(zh['dreaming.findMemory']).value).toBe('Test setup')
-  expect(find(uri)).toBeTruthy()
-  expect(server.requests.filter(request => request.path.endsWith('/memory/find'))).toEqual([
-    { path: 'dreaming/batches/batch-1/memory/find', method: 'POST', body: { query: 'Test setup' } },
-  ])
-  expect(text()).not.toContain(zh['dreaming.commitMemory'])
-  expect(server.requests.some(request => request.path.endsWith('/memory/write'))).toBe(false)
+  const result = find(zh['dreaming.dailyResults'], 'h2').closest('section')!
+  expect(result.querySelector('p')?.textContent).toBe(zh[active ? 'dreaming.maintenanceActive' : 'dreaming.maintenanceEmpty'])
 })
 
 it('states why a filtered search result has no Thread instead of opening an empty one', async () => {

@@ -3,10 +3,11 @@ import { execFile } from 'node:child_process'
 import { createReadStream } from 'node:fs'
 import { realpath, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { isAbsolute, join, relative, sep } from 'node:path'
+import { basename, isAbsolute, join, relative, sep } from 'node:path'
 import { createInterface } from 'node:readline'
 import { DatabaseSync } from 'node:sqlite'
 import { promisify } from 'node:util'
+import { findCodexWork } from './codex-desktop.ts'
 
 export interface CodexDelivery {
   threadId: string
@@ -14,8 +15,10 @@ export interface CodexDelivery {
   summary: string
 }
 export interface CodexHistory {
+  match?(request: { title: string; clues: string; requestedAt: string }, signal: AbortSignal): Promise<CodexMatch | undefined>
   delivery(request: { title: string; requestedAt: string }, signal: AbortSignal): Promise<CodexDelivery | undefined>
 }
+export interface CodexMatch { threadId: string; project: string }
 
 interface Artifact { repository: string; file: string; requirements: RegExp[] }
 interface DeliveryContract { title: RegExp; report: RegExp; validation: RegExp; allowProgressValidation?: true; artifacts: Artifact[]; output: string }
@@ -56,6 +59,55 @@ const within = (root: string, path: string) => {
 const git = promisify(execFile)
 interface ThreadRow { id: string; cwd: string; rollout_path: string }
 interface Evidence { report: number; validation: number }
+
+async function rollouts(projectPaths: readonly string[], codexHome: string, cutoff: number) {
+  const roots = [...new Set((await Promise.allSettled(projectPaths.map(path => realpath(path))))
+    .flatMap(result => result.status === 'fulfilled' ? [result.value] : []))].sort((a, b) => b.length - a.length)
+  const home = await realpath(codexHome)
+  const db = new DatabaseSync(join(home, 'state_5.sqlite'), { readOnly: true })
+  try {
+    const rows = db.prepare(`SELECT id, cwd, rollout_path, title, first_user_message, preview FROM threads
+      WHERE updated_at >= ? ORDER BY updated_at DESC`).all(Math.floor(cutoff / 1000)) as unknown as
+      (ThreadRow & { title: string; first_user_message: string; preview: string })[]
+    return { home, roots, rows: rows.flatMap(row => {
+      const root = roots.find(path => within(path, row.cwd))
+      return root && /^[\da-f-]{36}$/i.test(row.id) ? [{ ...row, root }] : []
+    }) }
+  } finally { db.close() }
+}
+
+async function originalRollout(home: string, row?: ThreadRow): Promise<string | undefined> {
+  if (!row) return
+  const file = await realpath(row.rollout_path).catch(() => undefined)
+  if (file?.endsWith(`-${row.id}.jsonl`)
+    && ['sessions', 'archived_sessions'].some(directory => within(join(home, directory), file))) return file
+}
+
+/** Retrieve task-specific user requests, including earlier turns of long work sessions. */
+async function userRequests(file: string, cutoff: number, signal: AbortSignal): Promise<string> {
+  if ((await stat(file)).size > 200 * 1024 * 1024) return ''
+  const stream = createReadStream(file, { signal, encoding: 'utf8' })
+  const lines = createInterface({ input: stream, crlfDelay: Infinity })
+  let requests = ''
+  try {
+    for await (const line of lines) {
+      if (line.length > 100_000 || !line.includes('"response_item"') || !line.includes('"user"')) continue
+      let row
+      try { row = JSON.parse(line) } catch { continue }
+      const message = row.payload
+      if (row.type !== 'response_item' || message?.type !== 'message' || message.role !== 'user'
+        || !(Date.parse(row.timestamp) >= cutoff) || !Array.isArray(message.content)) continue
+      for (const part of message.content) {
+        if (typeof part?.text === 'string' && !part.text.startsWith('<environment_context>')) requests += `\n${part.text.slice(0, 1200)}`
+      }
+      if (requests.length >= 12_000) break
+    }
+    return requests.slice(0, 12_000)
+  } finally {
+    lines.close()
+    stream.destroy()
+  }
+}
 
 async function readEvidence(file: string, requestedAt: number, contract: DeliveryContract, signal: AbortSignal): Promise<Evidence | undefined> {
   if ((await stat(file)).size > 200 * 1024 * 1024) return
@@ -106,6 +158,22 @@ async function committedArtifacts(root: string, artifacts: Artifact[], requested
 
 export function localCodexHistory(projectPaths: readonly string[], codexHome = process.env.CODEX_HOME || join(homedir(), '.codex')): CodexHistory {
   return {
+    async match({ title, clues, requestedAt }, signal) {
+      const cutoff = Date.parse(requestedAt)
+      if (!Number.isFinite(cutoff)) return
+      const { home, roots, rows } = await rollouts(projectPaths, codexHome, cutoff)
+      const byId = new Map(rows.map(row => [row.id, row]))
+      const projects = roots.map(cwd => ({ id: cwd, name: basename(cwd), cwd }))
+      const threads = rows.map(row => ({ id: row.id, projectId: row.root, status: 'unknown', title: row.title,
+        summary: `${row.title}\n${row.first_user_message.slice(0, 1400)}\n${row.preview.slice(0, 1400)}` }))
+      const match = await findCodexWork({ async content(id, signal) {
+        const file = await originalRollout(home, byId.get(id))
+        return file ? userRequests(file, cutoff, signal) : ''
+      } }, clues, projects, threads, title, signal)
+      if (match && !match.ambiguous && match.thread && await originalRollout(home, byId.get(match.thread.id))) {
+        return { threadId: match.thread.id, project: match.project.name }
+      }
+    },
     async delivery({ title, requestedAt }, signal) {
       const contract = contracts.find(item => item.title.test(title.trim()))
       const cutoff = Date.parse(requestedAt)
@@ -129,9 +197,8 @@ export function localCodexHistory(projectPaths: readonly string[], codexHome = p
         signal.throwIfAborted()
         const root = [...checked.keys()].find(path => within(path, row.cwd))
         if (!root || !/^[\da-f-]{36}$/i.test(row.id)) continue
-        const file = await realpath(row.rollout_path).catch(() => undefined)
-        if (!file || !file.endsWith(`-${row.id}.jsonl`)
-          || !['sessions', 'archived_sessions'].some(directory => within(join(home, directory), file))) continue
+        const file = await originalRollout(home, row)
+        if (!file) continue
         const evidence = await readEvidence(file, cutoff, contract, signal)
         if (evidence) return { threadId: row.id, evidenceLines: [evidence.report, evidence.validation],
           summary: `${contract.output}\nCodex 原会话：codex://threads/${row.id}（记录行 ${evidence.report}、${evidence.validation}）\n已核对提交：${checked.get(root)!.join('、')}。` }

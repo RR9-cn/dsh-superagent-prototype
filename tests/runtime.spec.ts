@@ -1,7 +1,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import { bindScopeParent } from '@deepseek-ai/dsh-scope'
 import { execFile, spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
 import { join } from 'node:path'
@@ -35,7 +35,9 @@ import { preview, readable } from '../src/app/views/text.ts'
 import { decisionList, search, threadDetail, threadList } from '../src/app/views/threads.ts'
 import { executorLoad, ticketDetail, ticketList } from '../src/app/views/tickets.ts'
 import type { DingTalkMessage } from '../src/sources/dingtalk.ts'
+import { DingTalkListener } from '../src/sources/dingtalk-listener.ts'
 import { matchCodexWork } from '../src/executor/codex-desktop.ts'
+import { localCodexHistory } from '../src/executor/codex-history.ts'
 import { terminalTask, type CommentReceipt, type HiFoxGateway, type HiFoxPilot, type HiFoxTaskStatus, type HiFoxWorkOrder,
   type RunObservation, type TaskReceipt } from '../src/executor/hifox-port.ts'
 
@@ -1612,6 +1614,24 @@ const hasPythonBridgeRuntime = typeof process.getuid === 'function'
   && spawnSync('python3', ['-B', '-c', 'import sys; raise SystemExit(sys.version_info < (3, 9))']).status === 0
 
 describe('DingTalk HiFox pilot', () => {
+  it.each([
+    { paused: false, enabled: true, starts: true },
+    { paused: true, enabled: true, starts: false },
+    { paused: false, enabled: false, starts: false },
+  ])('starts the managed listener on startup with paused=$paused and source enabled=$enabled', async ({ paused, enabled, starts }) => {
+    const { pilot } = fakeHiFox()
+    const listener = new DingTalkListener({ cli: process.execPath, profile: 'corp:user' }, pilot.scope,
+      vi.fn(), vi.fn(), vi.fn())
+    const start = vi.spyOn(listener, 'start').mockReturnValue({ state: 'starting' })
+    pilot.createDingTalkListener = () => listener
+    const settings = runtime.store.settings()
+    runtime.store.saveSettings({ ...settings, paused, sources: { ...settings.sources, dingtalk: { enabled, config: {} } } })
+
+    await startPilot(pilot)
+
+    expect(start).toHaveBeenCalledTimes(starts ? 1 : 0)
+  })
+
   it('finishes two original cards independently from one local Codex session and preserves the result across restart', async () => {
     const remote = fakeHiFox()
     await startPilot(remote.pilot)
@@ -1646,6 +1666,40 @@ describe('DingTalk HiFox pilot', () => {
     expect(matchCodexWork('注意下载文件，核对命令和 CRM 资料。', [project],
       [{ id: 'unrelated', projectId: project.id, title: '排查超时', status: 'active', summary }],
       'CRM 后台佣金申请列表的 sourceType 必须支持旺宝来源')).toBeUndefined()
+    expect(matchCodexWork('https://app.hifox.com/fshows/task/FSH-9，分支 feature/merchant-scene-voiceover，识别重复画面。', [project],
+      [{ id: 'tax-session', projectId: project.id, title: '测试开票税点', status: 'idle',
+        summary: '新增税点配置。删除重复数据。https://example.test/fshows，feature/merchant-payment。' }],
+      '口播/剪辑优化：视频按关键帧切割、客户端识别空镜调研、新增 featureId 与口播删除')).toBeUndefined()
+  })
+
+  it('links a local session by its original request even when the ticket has no predefined delivery rule', async () => {
+    const home = join(directory, 'local-codex')
+    const project = join(realpathSync(directory), 'crm')
+    const threadId = '4baf40ea-2fb3-4e42-8de6-d22fd3e23d0b'
+    const rollout = join(home, 'sessions', `rollout-${threadId}.jsonl`)
+    mkdirSync(join(home, 'sessions'), { recursive: true })
+    mkdirSync(project)
+    writeFileSync(rollout, JSON.stringify({ type: 'response_item', timestamp: '2026-11-27T04:00:00Z',
+      payload: { type: 'message', role: 'user', content: [{ text: 'CRM 后台佣金申请列表支持按 sourceType 查询旺宝来源' }] } }))
+    const index = new DatabaseSync(join(home, 'state_5.sqlite'))
+    index.exec('CREATE TABLE threads (id, cwd, rollout_path, title, first_user_message, preview, updated_at)')
+    index.prepare('INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?)').run(threadId, project, rollout, '本周迭代', '', '',
+      Date.parse('2026-11-27T04:00:00Z') / 1000)
+    index.close()
+
+    const remote = fakeHiFox()
+    await startPilot(remote.pilot)
+    const id = await acceptPilot(dingTalkMessage('crm'), 'CRM 后台佣金申请列表 sourceType 写死为付呗，需支持旺宝来源')
+    remote.finish(0, { outcome: 'blocked', summary: '等待项目' })
+    await advancePilot()
+    await startPilot({ ...remote.pilot, codexHistory: localCodexHistory([project], home) })
+    await advancePilot()
+
+    expect((await api('GET', `tickets/${id}`)).body).toMatchObject({
+      hifox: { codexProject: 'crm', codexThreadId: threadId, taskStatus: { category: 'started' } },
+    })
+    expect(lastPilotReport(id)?.state).toBe('blocked')
+    expect(remote.gateway.summon).toHaveBeenCalledTimes(1)
   })
 
   it('rechecks blocked HiFox cards against Codex work summaries after restart without starting duplicate work', async () => {
@@ -2087,6 +2141,80 @@ db.close()
     expect(remote.gateway.summon).toHaveBeenCalledTimes(1)
     expect(remote.comments.filter(row => row.text.includes('已使用补充信息完成。'))).toHaveLength(1)
     expect(runtime.effects.pending('hifox', ticketId)).toBe(false)
+  })
+
+  it('writes a new note on the original HiFox card and continues once after its blocked Run', async () => {
+    const remote = fakeHiFox()
+    await startPilot(remote.pilot)
+    const ticketId = await acceptPilot()
+    remote.finish(0, { outcome: 'blocked', summary: '缺少目标仓库。' })
+    await advancePilot()
+
+    const note = '目标仓库为 gateway，仓库修改授权待确认。'
+    const original = remote.runs[0]!
+    remote.runs.push({ ...original, runId: 'active-followup', status: 'running' })
+    runtime.engine.note(ticketId, note)
+    await advancePilot()
+    expect(remote.comments.filter(row => row.text.includes(note)).map(row => row.taskUuid)).toEqual(['task-1'])
+    expect(runtime.store.tickets.get(ticketId)?.undelivered).toEqual([])
+    expect(remote.gateway.summon).toHaveBeenCalledTimes(1)
+
+    remote.runs.pop()
+    await startPilot(remote.pilot)
+    await advancePilot()
+    expect(remote.orders).toHaveLength(2)
+    expect(remote.orders[1]).toMatchObject({ taskUuid: 'task-1', supplementalNotes: [note] })
+    expect(remote.orders[1]?.inputRevision).not.toBe(remote.orders[0]?.inputRevision)
+    expect(runtime.store.tickets.get(ticketId)?.attention).toBeUndefined()
+
+    remote.finish(1, { outcome: 'blocked', summary: '仍缺修改授权。' })
+    await advancePilot()
+    await startPilot(remote.pilot)
+    await advancePilot()
+    expect(remote.tasks).toHaveLength(1)
+    expect(remote.comments.filter(row => row.text.includes(note))).toHaveLength(1)
+    expect(remote.gateway.summon).toHaveBeenCalledTimes(2)
+    expect(lastPilotReport(ticketId)).toMatchObject({ state: 'blocked', summary: '仍缺修改授权。' })
+  })
+
+  it.each([false, true])('sends one DSH clarification and resumes the same card after the operator replies (lost receipt: %s)', async lost => {
+    const remote = fakeHiFox()
+    const group = 'clarification-group'
+    const sent = { messageId: 'dsh-question', senderId: 'operator', conversationId: group, text: '' }
+    const answer = { messageId: 'answer', senderId: 'operator', conversationId: group, text: '仓库是 gateway。',
+      quotedMessage: { messageId: sent.messageId, conversationId: group } }
+    const other = { ...answer, senderId: 'someone-else', messageId: 'other' }
+    const send = vi.fn(async (_id: string, text: string) => {
+      sent.text = text
+      if (lost) throw new Error('Receipt lost after sending')
+      return 'send-task'
+    })
+    const replies = vi.fn(async () => lost && sent.text ? [sent, other] : [other])
+    const pilot = { ...remote.pilot, clarifications: { group, responder: sent.senderId, send, confirm: vi.fn(async () => sent), replies } }
+    const poll = async () => {
+      runtime.store.db.prepare("UPDATE effect SET due = 0 WHERE kind = 'dingtalk-clarifications'").run()
+      await runtime.pump()
+      await runtime.idle()
+    }
+    await startPilot(pilot)
+    const ticketId = await acceptPilot()
+    remote.finish(0, { outcome: 'blocked', summary: '请确认目标仓库。' })
+    await advancePilot()
+    await poll()
+    await poll()
+    expect(send).toHaveBeenCalledWith(expect.any(String), expect.stringContaining('请确认目标仓库。'))
+    expect(remote.gateway.summon).toHaveBeenCalledTimes(1)
+    expect(runtime.store.tickets.get(ticketId)?.inputs.filter(input => input.kind === 'note')).toHaveLength(0)
+    expect(remote.sendDingTalk.mock.calls.some(([reply]) => reply.text.includes('请确认目标仓库。'))).toBe(false)
+
+    replies.mockResolvedValue([other, answer, answer])
+    await startPilot(pilot)
+    await poll()
+    await advancePilot()
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(remote.orders).toHaveLength(2)
+    expect(remote.orders[1]).toMatchObject({ taskUuid: 'task-1', supplementalNotes: ['工单联系人在钉钉澄清群回复：仓库是 gateway。'] })
+    expect(remote.comments.filter(row => row.text.includes(answer.text)).map(row => row.taskUuid)).toEqual(['task-1'])
   })
 
   it.each([['已完成', 'completed'], ['已取消', 'cancelled'], ['存在重复', 'duplicate']])(

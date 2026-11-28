@@ -237,14 +237,15 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
     }),
     tool({
       name: 'orchestrator_ticket_note',
-      description: 'Tell a ticket\'s worker a fact from other work, such as what another ticket found; it grants no authority.',
+      description: 'Give a ticket a relevant fact, such as what another ticket found. For HiFox tickets, queue it for the original card and follow-up within the existing mandate. A note grants no authority.',
       schema: z.object({
         ticket_id: z.string(),
         text: z.string().trim().min(1).refine(text => wordCount(text) <= IM_WORDS, `At most ${IM_WORDS} words`),
       }).strict(),
       execute: async args => {
-        host.engine.note(args.ticket_id, args.text)
-        return routed(host, { reason: 'Noted for the worker', ticketId: args.ticket_id })
+        const ticket = host.engine.note(args.ticket_id, args.text)
+        const reason = ticket.executionTarget === 'hifox' ? 'Queued for original HiFox card and follow-up' : 'Noted for the worker'
+        return routed(host, { reason, ticketId: ticket.id })
       },
     }),
     tool({

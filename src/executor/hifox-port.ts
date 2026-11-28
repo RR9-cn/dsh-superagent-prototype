@@ -4,6 +4,7 @@ import { dingTalkPilotScope, type DingTalkIntakeResult, type DingTalkMessage } f
 import type { DingTalkListener } from '../sources/dingtalk-listener.ts'
 import type { CodexDesktop } from './codex-desktop.ts'
 import type { CodexHistory } from './codex-history.ts'
+import type { DingTalkClarificationTransport } from '../sources/dingtalk-clarification.ts'
 
 const reference = z.string().regex(/^[\w:@.+/=-]{1,160}$/)
 export const hiFoxScope = dingTalkPilotScope.extend({
@@ -33,6 +34,7 @@ export interface HiFoxWorkOrder {
   initialClues: { triggerId: string; text: string; conversationId: string; messageId: string; at: string; quotedMessageId?: string }[]
   quotedClue?: { conversationId: string; messageId: string; text: string }
   routingNote?: string
+  supplementalNotes?: string[]
 }
 
 export const taskReceipt = z.object({ space: reference, taskUuid: reference, marker: reference,
@@ -85,6 +87,8 @@ export interface HiFoxGateway {
   comment(input: { taskUuid: string; marker: string; text: string }, signal: AbortSignal): Promise<CommentReceipt>
   findComments(taskUuid: string, marker: string, signal: AbortSignal): Promise<CommentReceipt[]>
   summon(input: { agent: string; work: HiFoxWorkOrder }, signal: AbortSignal): Promise<RunReceipt>
+  /** Check task-scoped activity before another Run can be started. */
+  hasActiveRuns?(taskUuid: string, signal: AbortSignal): Promise<boolean>
   /** Enumerates confirmed Task-owned Runs. If a candidate's activity is unknown the adapter must fail closed. */
   runs(taskUuid: string, signal: AbortSignal, agent?: string): Promise<RunObservation[]>
   run(receipt: RunReceipt, signal: AbortSignal): Promise<RunObservation | undefined>
@@ -98,6 +102,7 @@ export interface HiFoxPilot {
   gateway: HiFoxGateway
   codexDesktop?: CodexDesktop
   codexHistory?: CodexHistory
+  clarifications?: DingTalkClarificationTransport
   /** Expose the pilot ingress at ding.sock in Runtime's private state directory. */
   dingTalkSocket?: boolean
   /** In the standard desktop deployment, listen explicitly through the DWS child process. */

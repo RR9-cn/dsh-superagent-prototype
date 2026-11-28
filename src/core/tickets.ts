@@ -234,8 +234,9 @@ export class Tickets extends EnginePart {
   addInput(ticket: Ticket, input: TicketInput): void {
     if (ticket.inputs.some(existing => existing.id === input.id)) return
     ticket.inputs.push(input); ticket.updatedAt = this.now()
-    // Hold back automated inputs while the worker is waiting on a person.
-    const held = liveTicket(ticket) && automatic(input) && waitsForPerson(ticket)
+    // HiFox records notes on the original Task even while the executor is waiting for an answer.
+    const hiFoxNote = ticket.executionTarget === 'hifox' && input.kind === 'note'
+    const held = liveTicket(ticket) && automatic(input) && waitsForPerson(ticket) && !hiFoxNote
     if (!held) ticket.undelivered.push(input.id)
     this.repo.tickets.save(ticket)
     if (!liveTicket(ticket) || held) return

@@ -398,7 +398,7 @@ it('checks both duplicate versions, deletes only the confirmed old URI, and retr
   }
 })
 
-it.each(['merge', 'changed', 'skip', 'bad-evidence'])('automatically processes complementary memory candidates (%s)', async outcome => {
+it.each(['daily', 'merge', 'changed', 'skip', 'bad-evidence'])('automatically processes complementary memory candidates (%s)', async outcome => {
   const directory = mkdtempSync(join(tmpdir(), 'dreaming-merge-'))
   const store = new Store(join(directory, 'db.sqlite'))
   let now = Date.parse('2026-11-26T17:00:00.000Z')
@@ -441,14 +441,22 @@ it.each(['merge', 'changed', 'skip', 'bad-evidence'])('automatically processes c
   }
   try {
     const other = { ...old, uri: 'viking://~/peers/other/memories/experiences/test_config_paths.md' }
-    expect(dreaming.scanDuplicates({ targets: [keep, old, other], total: 3, skipped: [], unavailable: [] }).ids).toEqual([])
-    const plans = dreaming.view().merges!
-    expect(plans).toMatchObject([{ keep: { uri: keep.uri }, source: { uri: old.uri }, status: 'proposed' }])
-    expect(actions).toEqual([])
+    if (outcome !== 'daily') {
+      expect(dreaming.scanDuplicates({ targets: [keep, old, other], total: 3, skipped: [], unavailable: [] }).ids).toEqual([])
+      expect(dreaming.view().merges).toMatchObject([{ keep: { uri: keep.uri }, source: { uri: old.uri }, status: 'proposed' }])
+      expect(actions).toEqual([])
+    }
     // Enabling automatic maintenance also resumes candidates saved before startup.
-    dreaming.enableMaintenance(memory, async () => { throw new Error('Automatic audit is not due') }, () => false, () => now)
+    dreaming.enableMaintenance(memory, async () => {
+      expect(outcome).toBe('daily')
+      const targets = [keep, old, other]
+      return { packs: targets.map(target => ({ ...testEvidence, target, evidence: [] })), total: targets.length,
+        skipped: [], unavailable: [], archiveTotal: 1 }
+    }, () => false, () => now)
+    if (outcome === 'daily') now += 60 * 60_000
     effects.start()
-    await effects.idle('dreaming-merge')
+    await effects.idle()
+    expect(dreaming.view().maintenance?.merged).toBe(outcome === 'daily' ? 0 : undefined)
     const status = () => dreaming.view().merges![0]!.status
     if (outcome === 'skip' || outcome === 'bad-evidence') {
       expect(status()).toBe('skipped')
@@ -475,6 +483,7 @@ it.each(['merge', 'changed', 'skip', 'bad-evidence'])('automatically processes c
     await effects.idle('dreaming-merge')
     expect(status()).toBe('verified')
     expect(assessments).toBe(1)
+    expect(dreaming.view().maintenance?.merged).toBe(outcome === 'daily' ? 1 : undefined)
     expect(actions).toEqual(['write', 'recall before', 'recall before', 'delete', 'recall after', 'recall after'])
   } finally {
     await effects.drain()
@@ -529,7 +538,8 @@ it('runs automatic corrections and duplicate cleanup at 02:00 Beijing time', asy
     now += 1000
     await effects.idle()
     expect(dreaming.view().maintenance).toMatchObject({
-      active: false, revised: 1, removed: 1, unresolved: 0, nextAt: '2026-11-27T18:00:00.000Z',
+      active: false, revised: 1, removed: 1, unresolved: 0, finishedAt: '2026-11-26T18:00:00.000Z',
+      nextAt: '2026-11-27T18:00:00.000Z',
     })
     expect(applied).toEqual([target.uri])
     expect(removed).toEqual([remove.uri])

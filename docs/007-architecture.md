@@ -313,6 +313,7 @@ The app still has a few channel-specific integrations:
 | `src/app/setup.ts` | Setup, and `setupChanged`, whether a save changes a field setup reads |
 | `src/app/passes.ts` | Passes, the pass scheduler |
 | `src/app/outbox.ts` | The Outbox: the Engine's `Outbox` port, the receipts and the `reply` effects that send them |
+| `src/app/dingtalk-clarifications.ts` | Sends open HiFox clarification questions and records verified DingTalk replies as ticket notes |
 | `src/app/notices.ts` | The main Session's notices and relays: `eventNotice`, `reportRelay`, `resultRelay` and `followupRelay` |
 | `src/app/store.ts` | The Store, and `Receipt`, a message of the outbox |
 | `src/app/store-read.ts` | `storeReads`: the Store's read queries for the views, the tools and the Sources' polls, which never write |
@@ -372,6 +373,7 @@ The app still has a few channel-specific integrations:
 | `src/sources/host.ts` | `SourceHost`, `SourceContext`, `Health`, `health` and the fixed health texts |
 | `src/sources/poll.ts` | Polling helpers: `POLL_HORIZON_MS`, `polled`, `cursorAt`, and `pollThreads`, which keeps a failure on its Thread as `pollError` |
 | `src/sources/dingtalk-listener.ts`, `src/sources/dingtalk-reply.ts` | Managed DWS subscription and opt-in terminal quoted replies with verified delivery |
+| `src/sources/dingtalk-clarification.ts` | DWS send, confirmation and targeted group read for clarification questions |
 | `src/sources/dingtalk-context.ts` | Bounded, authenticated same-conversation quote and preceding messages for DSH routing |
 | `src/executor/hifox.ts`, `src/executor/hifox-port.ts` | HiFox task/Run orchestration, persisted bindings and evidence checks through an injected gateway |
 | `src/executor/hifox-cli.ts` | HiFox CLI task and Run verification and handoff of the scoped request to the selected Agent |

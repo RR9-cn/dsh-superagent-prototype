@@ -6,7 +6,7 @@ Use this guide to install, configure and operate dsh-superagent. It covers accou
 
 - **A dedicated DeepSeek Harness profile**, called `superagent` in this guide. Create it from the Web profile template. It loads the bundle and serves its panel on `127.0.0.1`. Keep it separate from the profile you work in: the plugin changes process-wide `PATH` and git settings, and its process needs independent restarts and upgrades.
 - **Optional:** a Feishu bot for chat requests and local DSH execution.
-- **Optional:** a DingTalk and HiFox pilot for remote execution. Configure it in **Settings → HiFox** and start the DingTalk listener explicitly.
+- **Optional:** a DingTalk and HiFox pilot for remote execution. Configure it in **Settings → HiFox** to start the DingTalk listener automatically.
 
 Plugin configuration holds the state directory and machine limits. Use the panel for everything else: Sources for channel accounts, Policy for allowed lists, and Execution for worker directories and commands.
 
@@ -142,12 +142,14 @@ Setup must succeed before polling or work starts. Overview lists missing require
 ### HiFox and DingTalk pilot
 
 1. In **Settings → HiFox**, select the HiFox Space and enter the authenticated DWS profile. If a CLI is outside the app's PATH, enter its absolute path under **CLI paths**. Maintain each available Agent's responsibilities, execution tools and permissions in HiFox.
-2. Enable HiFox and save. The plugin reloads the configuration. The listener starts separately from the plugin. Verified group mentions and direct requests from any sender in the receiving scope are eligible for routing.
-3. Choose **Start DingTalk listener** in Overview or HiFox settings. Wait for the live listener to say **Listening**. Choose **Stop DingTalk listener** to close the subscription. Check the live listener status after a plugin restart.
+2. Enable HiFox and save. The plugin reloads and starts the listener if the DingTalk source is enabled and DSH processing is active. Verified group mentions and direct requests from any sender in the receiving scope are eligible for routing.
+3. Check for **Listening** in Overview or HiFox settings. Use **Stop DingTalk listener** to close the subscription for the current plugin instance, and **Start DingTalk listener** to reopen it. On the next plugin startup, the same source and processing settings determine whether the listener starts automatically.
 
 The listener subscribes to incoming group and direct messages for the profile. Ordinary group messages supply conversation context. A verified group mention or an incoming direct message can enter routing if the sender is authorized. The DSH main session reads the original request, its direct quote, nearby messages preceding it in the same conversation, and the Space's current Agent roster. It selects an Agent for the request and records the selection on the DSH Ticket. Follow-ups on that Ticket use its recorded Agent. Requests that need clarification or have no suitable Agent stay unassigned for review.
 
 Automatic quoted replies are a separate opt-in. DSH verifies the selected Agent, HiFox Task, conversation, Run and input revision, then sends the verified result as a reply to the original message. An existing reply opt-in with a legacy conversation ID remains limited to that conversation.
+
+To route HiFox clarification questions to a dedicated group, set `dingTalkClarificationGroup` to its `openConversationId` and `dingTalkClarificationResponder` to the DWS operator's open DingTalk ID in the desktop plugin configuration. DSH sends the question through the configured DWS account. Reply by quoting that message, or prefix the reply with the code in the notification. DSH reads the group for replies from the configured account, adds each reply to the existing ticket and hands it back to the original HiFox card for follow-up.
 
 ### Management API
 

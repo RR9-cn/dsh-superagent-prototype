@@ -1,19 +1,19 @@
 import { Later, PollAgain, type Effects } from '../app/effects.ts'
 import type { Store } from '../app/store.ts'
 import {
-  key, latestAssignment, liveTicket, type Assignment, type Engine, type Policy, type Ticket, type TicketInput,
+  key, latestAssignment, liveTicket, waitsForPerson, type Assignment, type Engine, type Policy, type Ticket, type TicketInput,
 } from '../core/index.ts'
 import { family, record } from '../kv.ts'
 import { DINGTALK, dingTalkMeta, pilotTrigger } from '../sources/dingtalk.ts'
 import { findCodexWork, type CodexProject } from './codex-desktop.ts'
-import type { CodexDelivery } from './codex-history.ts'
+import type { CodexDelivery, CodexMatch } from './codex-history.ts'
 import {
   commentReceipt, parseWorkerReport, runObservation, runReceipt, taskReceipt, terminalTask,
   type HiFoxPilot, type HiFoxScope, type HiFoxTaskStatus, type HiFoxTaskTarget, type HiFoxWorkOrder, type RunObservation, type RunReceipt,
 } from './hifox-port.ts'
 
 type TriggerInput = Extract<TicketInput, { kind: 'trigger' }>
-type LaunchFact = Pick<HiFoxWorkOrder, 'assignmentId' | 'taskUuid' | 'launchKey' | 'inputRevision'> & { agentId?: string }
+type LaunchFact = Pick<HiFoxWorkOrder, 'assignmentId' | 'taskUuid' | 'launchKey' | 'inputRevision'> & { agentId?: string; noteRevision?: string }
 type OperationKey = { marker: string; since: number }
 type Pending = OperationKey & (
   | { kind: 'task' }
@@ -46,7 +46,7 @@ interface Binding {
   lastResult?: Result
   reportedFollowupRuns?: string[]
   codexContentCheck?: { revision: string; at: number }
-  codexDeliveryCheck?: { revision: string; at: number }
+  codexDeliveryCheck?: { revision: string; at: number; matchRevision?: string; match?: CodexMatch }
   codex?: {
     project: CodexProject
     evidence?: string[]
@@ -66,6 +66,7 @@ export function hiFoxTicket(store: Pick<Store, 'get'>, ticket: Ticket) {
   const assignment = latestAssignment(ticket)
   const attempt = assignment && binding?.attempts[assignment.id]
   const taskUrl = binding?.taskUrl && taskReceipt.shape.taskUrl.safeParse(binding.taskUrl).data
+  const match = binding?.codexDeliveryCheck?.match
   return {
     taskUuid: binding?.taskUuid ?? null,
     taskUrl: taskUrl || null,
@@ -73,7 +74,8 @@ export function hiFoxTicket(store: Pick<Store, 'get'>, ticket: Ticket) {
     runId: assignment && binding?.lastResult?.assignmentId === assignment.id
       ? binding.lastResult.runId ?? attempt?.receipt.runId ?? null : attempt?.receipt.runId ?? null,
     conversationId: attempt?.receipt.conversationId ?? null,
-    ...(binding?.codex ? { codexProject: binding.codex.project.name, codexThreadId: binding.codex.threadId ?? null } : {}),
+    ...(binding?.codex ? { codexProject: binding.codex.project.name, codexThreadId: binding.codex.threadId ?? null }
+      : match ? { codexProject: match.project, codexThreadId: match.threadId } : {}),
     agentId: ticket.hiFoxAgent?.agentId ?? attempt?.receipt.agentId ?? null,
     ...(ticket.hiFoxAgent?.agentName ? { agentName: ticket.hiFoxAgent.agentName } : {}),
   }
@@ -89,7 +91,7 @@ const sameRun = (a: RunReceipt, b: RunReceipt): boolean =>
 interface Host {
   store: Store
   effects: Effects
-  engine: Pick<Engine, 'assignmentStarted' | 'inputsDelivered' | 'inputsRead' | 'report' | 'reply' | 'stopTicket'>
+  engine: Pick<Engine, 'assignmentStarted' | 'inputsDelivered' | 'inputsRead' | 'report' | 'reply' | 'stopTicket' | 'retryTicket'>
   pilot: HiFoxPilot & { scope: HiFoxScope }
   policy(): Policy
   paused(): boolean
@@ -99,6 +101,8 @@ interface Host {
 interface Inputs {
   revision: string
   triggerInputs: { input: TriggerInput; text: string }[]
+  notes: Extract<TicketInput, { kind: 'note' }>[]
+  noteRevision?: string
   initialClues: HiFoxWorkOrder['initialClues']
   quotedClue?: HiFoxWorkOrder['quotedClue']
 }
@@ -165,9 +169,11 @@ export class HiFoxExecutor {
     const quote = ticket.hiFoxQuote
     const quotedClue = quote && quote.messageId === initial.quotedMessageId
       ? { ...quote, conversationId: initial.conversationId } : undefined
-    return { triggerInputs, initialClues, ...(quotedClue ? { quotedClue } : {}),
+    const notes = ticket.inputs.filter(input => input.kind === 'note')
+    const noteRevision = notes.length ? key('hifox-notes', ...notes.map(note => note.id)) : undefined
+    return { triggerInputs, initialClues, notes, noteRevision, ...(quotedClue ? { quotedClue } : {}),
       revision: key('hifox-input', ...seen, ...(quotedClue ? [quotedClue.messageId, quotedClue.text] : []),
-        ...(ticket.hiFoxRoutingNote ? [ticket.hiFoxRoutingNote] : [])) }
+        ...(ticket.hiFoxRoutingNote ? [ticket.hiFoxRoutingNote] : []), ...(noteRevision ? [noteRevision] : [])) }
   }
   private authorized(ticketId: string, assignmentId: string, revision: string): boolean {
     if (this.host.paused() || this.host.lifetime.aborted) throw new Later('HiFox is paused')
@@ -216,7 +222,8 @@ export class HiFoxExecutor {
         if (store.get(activeRun)) throw new Later('The HiFox pilot run slot is occupied')
         store.set(activeRun, { ticketId: ticket.id, assignmentId: assignment.id })
         const { assignmentId, taskUuid, launchKey, inputRevision } = op.work
-        intent = { kind: op.kind, marker, since, work: { assignmentId, taskUuid, launchKey, inputRevision, agentId: ticket.hiFoxAgent!.agentId } }
+        intent = { kind: op.kind, marker, since, work: { assignmentId, taskUuid, launchKey, inputRevision,
+          agentId: ticket.hiFoxAgent!.agentId, ...(inputs.noteRevision ? { noteRevision: inputs.noteRevision } : {}) } }
       } else {
         intent = op.kind === 'comment' ? { kind: op.kind, marker, since, taskUuid: op.taskUuid } : { kind: op.kind, marker, since }
       }
@@ -277,6 +284,19 @@ export class HiFoxExecutor {
       if (owner?.ticketId === ticketId && owner.assignmentId === attempt.work.assignmentId) this.host.store.delete(activeRun)
     })
     return run
+  }
+  private async deliverNotes(ticket: Ticket, assignment: Assignment, binding: Binding, inputs: Inputs, taskUuid: string): Promise<void> {
+    for (const note of inputs.notes) {
+      const marker = key('hifox-note', ticket.id, note.id)
+      if (!binding.comments[marker]) {
+        await this.write(ticket, assignment, binding, inputs, { kind: 'comment', taskUuid, marker, since: this.now(),
+          text: `工单补充（在原授权范围内跟进）\n${note.text}` })
+      }
+    }
+    if (!this.authorized(ticket.id, assignment.id, inputs.revision)) throw new Later('The current HiFox inputs changed')
+    const current = this.current(ticket.id, assignment.id)!
+    const delivered = inputs.notes.filter(note => current.ticket.undelivered.includes(note.id)).map(note => note.id)
+    if (current.assignment.state === 'running' && delivered.length) this.host.engine.inputsDelivered(ticket.id, assignment.id, delivered)
   }
   private async deliver(ticket: Ticket, assignment: Assignment, binding: Binding, inputs: Inputs): Promise<void> {
     const { engine, store } = this.host
@@ -341,8 +361,10 @@ export class HiFoxExecutor {
           text: `${verdict.summary} HiFox 卡 ${binding.taskUuid}，输入版本 ${inputs.revision}。` })
       } else {
         engine.report(ticket.id, { state: 'blocked', summary: verdict.summary, question: verdict.summary })
-        engine.reply({ purpose: 'attention', ticketId: ticket.id, question: verdict.summary, text: verdict.summary,
-          ...(verdict.code === 'agent_blocked' ? { hiFoxTerminal: true } : {}) })
+        if (!this.host.pilot.clarifications) {
+          engine.reply({ purpose: 'attention', ticketId: ticket.id, question: verdict.summary, text: verdict.summary,
+            ...(verdict.code === 'agent_blocked' ? { hiFoxTerminal: true } : {}) })
+        }
       }
     })
     return true
@@ -491,6 +513,14 @@ export class HiFoxExecutor {
     })
     return closed
   }
+  private async hasActiveRuns(taskUuid: string, agentId: string): Promise<boolean> {
+    const { gateway } = this.host.pilot
+    if (gateway.hasActiveRuns) return gateway.hasActiveRuns(taskUuid, this.signal())
+    return (await gateway.runs(taskUuid, this.signal(), agentId)).some(item => {
+      const run = runObservation.safeParse(item).data
+      return !run || run.taskUuid !== taskUuid || !stopped(run)
+    })
+  }
   private async step(ticketId: string): Promise<void> {
     const { store, pilot, engine } = this.host
     const ticketRecord = store.tickets.get(ticketId)
@@ -525,10 +555,14 @@ export class HiFoxExecutor {
     const { ticket, assignment } = active
     if (!inputs) { this.block(ticketId, binding, '请核对钉钉原消息、会话及工单授权状态。'); return }
     const attemptForAssignment = binding.attempts[assignment.id]
+    if (binding.taskUuid && inputs.notes.length) await this.deliverNotes(ticket, assignment, binding, inputs, binding.taskUuid)
     const historyCheck = binding.codexDeliveryCheck
+    const notes = inputs.notes.map(input => input.text)
+    const matchRevision = key('codex-history-match', ticket.title, inputs.revision, ...notes)
     if (pilot.codexHistory && binding.taskUuid && ticket.mandate.strength === 'explicit'
       && (!attemptForAssignment || attemptForAssignment.terminal || binding.lastResult?.assignmentId === assignment.id)
-      && (historyCheck?.revision !== inputs.revision || this.now() - historyCheck.at >= codexContentCheckInterval)) {
+      && (historyCheck?.revision !== inputs.revision || (pilot.codexHistory.match && historyCheck.matchRevision !== matchRevision)
+        || this.now() - historyCheck.at >= codexContentCheckInterval)) {
       const requestedAt = inputs.initialClues.map(clue => clue.at).sort().at(-1)!
       const cardContent = await pilot.gateway.taskContent?.(binding.taskUuid, this.signal())
       const cardTitle = cardContent === undefined ? ticket.title : cardContent.split('\n', 1)[0]?.trim()
@@ -542,7 +576,10 @@ export class HiFoxExecutor {
           verdict: { code: 'ready', summary: delivery.summary }, codexDelivery: delivery })
         return
       }
-      binding.codexDeliveryCheck = { revision: inputs.revision, at: this.now() }
+      const clues = [ticket.title, binding.taskUrl ?? '', ...inputs.initialClues.map(clue => clue.text), inputs.quotedClue?.text ?? '', ...notes].join('\n')
+      const match = await pilot.codexHistory.match?.({ title: cardContent || ticket.title, clues, requestedAt }, this.signal())
+      if (!this.authorized(ticketId, assignment.id, inputs.revision)) throw new Later('The work changed while matching local Codex sessions')
+      binding.codexDeliveryCheck = { revision: inputs.revision, at: this.now(), matchRevision, ...(match ? { match } : {}) }
       this.save(ticketId, binding)
     }
     const desktop = pilot.codexDesktop
@@ -580,6 +617,19 @@ export class HiFoxExecutor {
       await this.followTask(ticket, assignment, binding, inputs)
       return
     }
+    if (!binding.codex && binding.taskUuid && attemptForAssignment?.terminal && assignment.report?.state === 'blocked'
+      && waitsForPerson(ticket) && inputs.noteRevision && attemptForAssignment.work.noteRevision !== inputs.noteRevision) {
+      const hasActiveRuns = await this.hasActiveRuns(binding.taskUuid, selected.agentId)
+      if (!this.authorized(ticketId, assignment.id, inputs.revision)) throw new Later('The current HiFox work changed before continuation')
+      if (hasActiveRuns) throw new PollAgain('Waiting for the existing HiFox Run before continuing with new notes', taskFollowupInterval)
+      if (await this.syncTask(ticketId, binding)) return
+      if (!this.authorized(ticketId, assignment.id, inputs.revision)) throw new Later('The current HiFox work changed before continuation')
+      store.atomic(() => {
+        engine.retryTicket(ticketId)
+        engine.report(ticketId, { state: 'progress', summary: '已同步原卡补充，正在按原授权安排续办。', question: null })
+      })
+      return
+    }
     if (!binding.codex && (desktop || pilot.codexHistory) && assignment.report?.state === 'blocked' && !attemptForAssignment && binding.taskUuid) {
       throw new PollAgain('Waiting for new evidence of a matching Codex session', codexContentCheckInterval)
     }
@@ -589,6 +639,7 @@ export class HiFoxExecutor {
       await this.write(ticket, assignment, binding, inputs, { kind: 'task', marker, since: this.now(),
         title: ticket.title, description: JSON.stringify({ ticketId, origin: inputs.initialClues[0]?.messageId }) })
       if (await this.syncTask(ticketId, binding)) return
+      if (binding.taskUuid && inputs.notes.length) await this.deliverNotes(ticket, assignment, binding, inputs, binding.taskUuid)
     }
     if (binding.codex) {
       await this.advanceCodex(ticket, assignment, binding, inputs)
@@ -599,12 +650,9 @@ export class HiFoxExecutor {
     if (!attempt) {
       if (store.get(activeRun)) throw new Later('The HiFox pilot run slot is occupied')
       if (!await this.selectedAgentAvailable(ticketId, binding, selected.agentId)) return
-      const existing = await pilot.gateway.runs(binding.taskUuid!, this.signal(), selected.agentId)
+      const hasActiveRuns = await this.hasActiveRuns(binding.taskUuid!, selected.agentId)
       if (!this.authorized(ticketId, assignment.id, inputs.revision)) throw new Later('The current HiFox work changed before dispatch')
-      if (existing.some(item => {
-        const run = runObservation.safeParse(item).data
-        return !run || run.taskUuid !== binding.taskUuid || !stopped(run)
-      })) {
+      if (hasActiveRuns) {
         this.block(ticketId, binding, '请人工核对原卡已有 HiFox 执行的归属和状态。')
         return
       }
@@ -612,7 +660,7 @@ export class HiFoxExecutor {
       const work = { ticketId, assignmentId: assignment.id, taskUuid: binding.taskUuid!,
         launchKey, inputRevision: inputs.revision, initialClues: inputs.initialClues,
         ...(inputs.quotedClue ? { quotedClue: inputs.quotedClue } : {}),
-        ...(ticket.hiFoxRoutingNote ? { routingNote: ticket.hiFoxRoutingNote } : {}) }
+        ...(ticket.hiFoxRoutingNote ? { routingNote: ticket.hiFoxRoutingNote } : {}), ...(notes.length ? { supplementalNotes: notes } : {}) }
       await this.write(ticket, assignment, binding, inputs, { kind: 'launch', marker: launchKey, since: this.now(), work })
       attempt = binding.attempts[assignment.id]!
     }
@@ -622,6 +670,7 @@ export class HiFoxExecutor {
       if (!this.authorized(ticketId, assignment.id, inputs.revision)) throw new Later('The current HiFox work changed during status update')
       engine.assignmentStarted(ticketId, assignment.id)
       await this.deliver(ticket, assignment, binding, inputs)
+      if (inputs.notes.length) await this.deliverNotes(ticket, assignment, binding, inputs, binding.taskUuid!)
     }
     const run = await this.observe(ticketId, binding, attempt)
     if (!run) return
@@ -634,7 +683,8 @@ export class HiFoxExecutor {
       ? binding.verified
       : { assignmentId: assignment.id, revision: inputs.revision, runId: run.runId, verdict: this.verdict(run, attempt, inputs) }
     const reported = await this.finish(ticket, assignment, binding, inputs, result)
-    if (reported && pilot.gateway.taskRun && result.verdict.code !== 'ready') {
+    if (reported && result.verdict.code !== 'ready'
+      && (pilot.gateway.taskRun || (inputs.noteRevision && attempt.work.noteRevision !== inputs.noteRevision))) {
       throw new PollAgain('Waiting for a newer result on the HiFox Task', taskFollowupInterval)
     }
   }

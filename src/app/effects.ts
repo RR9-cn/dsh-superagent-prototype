@@ -29,6 +29,8 @@ export interface EffectPayloads {
   delivery: { ticketId: string }
   /** Advance a HiFox ticket or reconcile its outstanding external write, keyed by ticket ID. */
   hifox: { ticketId: string }
+  /** Send open HiFox clarification questions and collect verified replies in the configured group. */
+  'dingtalk-clarifications': Record<string, never>
   /** Steer a report or a candidate into the main Session; the key is the request ID. */
   relay: { text: string }
   /** Inject a notice into the main Session without waking it; the key names what it reports, such as `prompts`. */

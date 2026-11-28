@@ -37,6 +37,8 @@ export const Config = s.object({
   // A legacy reply opt-in stays bounded to its original conversation. Intake never uses this key.
   dingTalkConversationId: s.string(),
   dingTalkRepliesEnabled: s.boolean().default(false).description('Authorize final quoted replies to the originating DingTalk message.'),
+  dingTalkClarificationGroup: s.string().pattern(/^cid[\w.+/=-]+$/).description('DingTalk group openConversationId for HiFox clarification questions and replies. Leave empty to disable.'),
+  dingTalkClarificationResponder: s.string().pattern(/^[\w:@.+=/-]{1,160}$/).description('Open DingTalk ID of the signed-in operator whose replies can answer HiFox clarifications.'),
   promptMaxChars: s.number().min(LIMITS.promptMaxChars.min).max(LIMITS.promptMaxChars.max).step(1).default(100000)
     .description('Largest saved prompt configuration, in characters.').volatile(),
   admissionContextMaxPages: s.number().min(LIMITS.admissionContextMaxPages.min).max(LIMITS.admissionContextMaxPages.max).step(1).default(10)

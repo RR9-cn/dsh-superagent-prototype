@@ -8,6 +8,7 @@ import { pilotCommand, type PilotCommand } from '../infra/pilot-cli.ts'
 import { DingTalkListener } from '../sources/dingtalk-listener.ts'
 import { dingTalkTerminalSender } from '../sources/dingtalk-reply.ts'
 import { dingTalkRoutingContext } from '../sources/dingtalk-context.ts'
+import { dingTalkClarificationTransport } from '../sources/dingtalk-clarification.ts'
 
 export type DesktopHiFox = { pilot?: HiFoxPilot; detail?: string }
 
@@ -31,9 +32,13 @@ export async function desktopHiFox(config: DeploymentConfig, lifetime: AbortSign
   const dws = { cli: dingTalkCli, profile: dwsProfile }
   const gateway = hiFoxCliGateway(command, hiFoxCli, scope)
   const history = config.codexProjectPaths?.length ? localCodexHistory(config.codexProjectPaths) : undefined
+  const clarificationGroup = config.dingTalkClarificationGroup?.trim()
+  const clarificationResponder = config.dingTalkClarificationResponder?.trim()
   return { pilot: {
     scope, gateway,
     ...(history ? { codexHistory: history } : {}),
+    ...(clarificationGroup && clarificationResponder
+      ? { clarifications: dingTalkClarificationTransport(command, dws, clarificationGroup, clarificationResponder, lifetime) } : {}),
     createDingTalkListener: receive => new DingTalkListener(dws, scope, command, gateway.verify, receive),
     readDingTalkContext: dingTalkRoutingContext(command, dws),
     sendDingTalk: dingTalkTerminalSender(command, dws, config.dingTalkConversationId?.trim() || undefined,

@@ -104,8 +104,9 @@ const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 const words = new Intl.Segmenter('zh', { granularity: 'word' })
 const genericWords = new Set(['任务', '项目', '问题', '会话', '已经', '相关', '当前', '实现', '处理', '调整', '修改', '修复', '补充', '更新',
   '执行', '开发', '需要', '继续', '验证', '完成', '支持', '功能', '测试', '代码', '接口', '页面', '工作', '信息', '请问', '开始',
-  '注意', '命令', '下载', '资料', '结果', '要求', '查看', '说明', '原因', '确认',
-  'codex', 'hifox', 'project', 'task', 'fix', 'change', 'update', 'implement', 'added', 'using', 'the', 'and', 'with', 'for'])
+  '注意', '命令', '下载', '资料', '结果', '要求', '查看', '说明', '原因', '确认', '新增', '删除', '重复',
+  'codex', 'hifox', 'project', 'task', 'fix', 'change', 'update', 'implement', 'added', 'using', 'the', 'and', 'with', 'for',
+  'http', 'https', 'docs', 'iterations', 'feature', 'fshows', 'merchant'])
 const particles = new Set([...('的了和及而与或在将从用于以为是对把被由也并都就还请需让按再中内外上下一')])
 
 function contentTerms(value: string): Set<string> {
@@ -166,7 +167,7 @@ export function matchCodexWork(clues: string, projects: readonly CodexProject[],
   return selected ? { project: selected, thread: candidates.length === 1 ? candidates[0] : undefined } : undefined
 }
 
-export async function findCodexWork(desktop: CodexDesktop, clues: string, projects: readonly CodexProject[],
+export async function findCodexWork(desktop: Pick<CodexDesktop, 'content'>, clues: string, projects: readonly CodexProject[],
   threads: readonly CodexThread[], cardContent: string, signal: AbortSignal) {
   const first = matchCodexWork(clues, projects, threads, cardContent)
   if (!desktop.content || (first && !first.ambiguous && first.thread)) return first

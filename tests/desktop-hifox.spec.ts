@@ -142,6 +142,25 @@ setInterval(() => {}, 1000)
 })
 
 describe('verified transport contracts', () => {
+  it('checks the last Run on each bound conversation without scanning Agent history', async () => {
+    let status = 'running'
+    let conversationId = 'chat-1'
+    const command = vi.fn<PilotCommand>(async (_binary, [group, action, target]) => {
+      if (group === 'task' && action === 'view' && target === work.taskUuid) return result({ id: work.taskUuid, spaceId: scope.space,
+        description: 'DSH-SUPERAGENT-OPERATION:marker', agentChatSessions: [{ id: 'chat-1', agentId: selectedAgent, lastRunId: 'run-1' }] })
+      if (group === 'run' && action === 'list' && target === '--task') return result([])
+      if (group === 'run' && action === 'view' && target === 'run-1') return result({ id: target, taskId: '', agentId: selectedAgent,
+        chatSessionId: conversationId, status })
+      throw new Error('unexpected remote operation')
+    })
+    const gateway = hiFoxCliGateway(command, '/hifox', scope)
+    await expect(gateway.hasActiveRuns?.(work.taskUuid, signal)).resolves.toBe(true)
+    status = 'completed'
+    await expect(gateway.hasActiveRuns?.(work.taskUuid, signal)).resolves.toBe(false)
+    conversationId = 'unrelated-chat'
+    await expect(gateway.hasActiveRuns?.(work.taskUuid, signal)).rejects.toThrow('bound HiFox Task conversation')
+  })
+
   it('does not mutate a Space with active automations or summon an unrelated Agent', async () => {
     let activeAutomations = true
     const command = vi.fn<PilotCommand>(async (_binary, [group, action]) => {

@@ -94,6 +94,7 @@ type Maintenance = {
   finishedAt?: number
   batchIds: string[]
   pairIds: string[]
+  mergeIds?: string[]
   protectedUris: string[]
   revised: number
   removed: number
@@ -148,6 +149,8 @@ export class Dreaming {
   view() {
     const scan = this.store.get(duplicateScan)
     const maintenance = this.store.get(maintenanceRun)
+    const finishedAt = maintenance?.finishedAt
+    const merged = maintenance?.mergeIds?.filter(id => this.store.get(merges(id))?.status === 'verified').length
     const mergeIds = this.store.get(mergeScan)
     return { mode: 'dsh' as const, pack: this.evidence(), batches: this.list(), published: this.current(), bulk: this.store.get(lastBulk) ?? null,
       ...(scan ? { duplicates: { ...scan, pairs: this.duplicatePairs().filter(pair =>
@@ -155,6 +158,8 @@ export class Dreaming {
       ...(mergeIds ? { merges: this.mergePlans().filter(plan => mergeIds.includes(plan.id) || plan.status !== 'proposed')
         .map(({ id, keep, source, status, decision }) => ({ id, keep, source, status, ...(decision ? { reason: decision.reason } : {}) })) } : {}),
       ...(this.maintenanceEnabled ? { maintenance: { active: this.maintenanceCollecting || (!!maintenance && !maintenance.finishedAt),
+        ...(finishedAt === undefined ? {} : { finishedAt: new Date(finishedAt).toISOString() }),
+        ...(merged === undefined ? {} : { merged }),
         revised: maintenance?.revised ?? 0, removed: maintenance?.removed ?? 0, unresolved: maintenance?.unresolved ?? 0,
         nextAt: maintenance && !maintenance.finishedAt ? undefined : new Date(this.maintenanceDue(maintenance)).toISOString() } } : {}) }
   }
@@ -198,13 +203,16 @@ export class Dreaming {
         if (paused()) throw new PollAgain('Dreaming maintenance is paused', 60_000)
         run = this.store.atomic(() => {
           const { batchIds, pairIds } = this.queueAll(input)
+          const mergeIds = this.autoMergeEnabled && input.archiveTotal !== undefined
+            ? this.store.get(mergeScan)?.filter(id => this.store.get(merges(id))?.status === 'proposed')
+            : undefined
           const allowed = new Set(pairIds)
           const pairs = this.duplicatePairs().filter(pair => ['deleting', 'pending_verification'].includes(pair.status) ||
             (allowed.has(pair.id) && pair.status === 'proposed'))
           const recallChecks = this.list().flatMap(batch => batch.status === 'ready' && batch.candidate.review === 'approved' &&
             batch.candidate.memory?.errorCode === 'recall_pending' ? [batch.id] : [])
           const next: Maintenance = { scannedAt: now(), batchIds: [...new Set([...batchIds, ...recallChecks])],
-            pairIds: pairs.map(pair => pair.id),
+            pairIds: pairs.map(pair => pair.id), mergeIds,
             protectedUris: [...new Set(pairs.flatMap(pair => [pair.remove.uri, pair.keep.uri]))],
             revised: 0, removed: 0, unresolved: 0 }
           this.store.set(maintenanceRun, next)

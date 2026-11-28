@@ -45,6 +45,7 @@ import { eventNotice, followupNotice } from './notices.ts'
 import { retireSources } from './retired-sources.ts'
 import { HealthBoard } from '../infra/health.ts'
 import { Outbox } from './outbox.ts'
+import { dingTalkClarifications } from './dingtalk-clarifications.ts'
 import { Passes } from './passes.ts'
 import { Setup } from './setup.ts'
 import { feishuSettings } from '../sources/feishu.ts'
@@ -166,6 +167,7 @@ export class Runtime extends Service implements SourceHost {
           ...(reconcileMs === undefined ? {} : { reconcileMs }),
           ...(hiFoxPilot.codexDesktop ? { codexDesktop: hiFoxPilot.codexDesktop } : {}),
           ...(hiFoxPilot.codexHistory ? { codexHistory: hiFoxPilot.codexHistory } : {}),
+          ...(hiFoxPilot.clarifications ? { clarifications: hiFoxPilot.clarifications } : {}),
           sendDingTalk: hiFoxPilot.sendDingTalk.bind(hiFoxPilot) }
         this.hiFoxScope = pilot.scope
         this.hiFoxAgents = gateway.agents.bind(gateway)
@@ -231,6 +233,10 @@ export class Runtime extends Service implements SourceHost {
           const followup = followed ? followupNotice(store, sources, event.data.triggerId) : undefined
           if (followup) sessions.relay(followup.id, followup.text)
         } })
+      if (hiFoxPilot?.clarifications) {
+        dingTalkClarifications(store, effects, engine, hiFoxPilot.clarifications,
+          () => this.closing() || this.paused() || !sources.instance(DINGTALK)?.enabled)
+      }
       // Update the `evals` health entry on every pass if an evaluation failed as unavailable within the last hour.
       const evals = board.claim('evals', { state: 'ready', detail: 'No unavailable Eval in the last hour' })
       const evaluateDue = () => { engine.evaluateDue(); evals.set(evalsHealth(store)) }
@@ -341,6 +347,7 @@ export class Runtime extends Service implements SourceHost {
     }
     this.passes.start()
     this.effects.start()
+    this.startListener()
     this.runtimeHealth.set({ state: 'ready', detail: 'Orchestrator is ready', at: now() })
   }
   private hiFoxStatus() {
